@@ -13,6 +13,7 @@ import {
   KeyRound,
   Loader2,
   MoreHorizontal,
+  MoreVertical,
   Plus,
   Search,
   SquareTerminal,
@@ -33,6 +34,7 @@ import {
 import { useStudio } from '@/lib/store';
 import { buildSelect } from '@/lib/sql';
 import { cn } from '@/lib/utils';
+import { useConfirm } from '@/components/confirm';
 import { Input } from '@/components/ui/input';
 import { Button } from '@/components/ui/button';
 import { ScrollArea } from '@/components/ui/scroll-area';
@@ -85,6 +87,7 @@ export function SchemaTree() {
   const canManageDb = !!driver?.capabilities.manageDatabases;
   const backupFormats = driver?.capabilities.backupFormats ?? [];
   const fileRef = useRef<HTMLInputElement>(null);
+  const confirm = useConfirm();
 
   const { data: databases } = useDatabases(
     driver?.capabilities.multipleDatabases ? activeConnectionId : null,
@@ -115,12 +118,14 @@ export function SchemaTree() {
   }
 
   async function handleDrop(table: string, tableSchema?: string) {
-    if (
-      !window.confirm(
-        `Drop "${table}"? This permanently deletes the table and all its data.`,
-      )
-    )
-      return;
+    const ok = await confirm({
+      title: `Drop “${table}”?`,
+      description:
+        'This permanently deletes the table and all of its data. This cannot be undone.',
+      confirmText: 'Drop table',
+      destructive: true,
+    });
+    if (!ok) return;
     try {
       await api.dropTable(
         activeConnectionId as string,
@@ -159,12 +164,12 @@ export function SchemaTree() {
 
   async function handleRestoreFile(file: File) {
     const format: BackupFormat = file.name.endsWith('.sql') ? 'sql' : 'json';
-    if (
-      !window.confirm(
-        `Restore from "${file.name}"? This writes data into the current database.`,
-      )
-    )
-      return;
+    const ok = await confirm({
+      title: 'Restore from file?',
+      description: `“${file.name}” will be written into the current database. Existing rows may be overwritten.`,
+      confirmText: 'Restore',
+    });
+    if (!ok) return;
     try {
       const content = await file.text();
       const res = await api.restore(
@@ -186,9 +191,40 @@ export function SchemaTree() {
     }
   }
 
+  async function handleDropDatabase(name: string) {
+    const ok = await confirm({
+      title: `Drop database “${name}”?`,
+      description:
+        'This permanently deletes the database and all of its data. This cannot be undone.',
+      confirmText: 'Drop database',
+      destructive: true,
+    });
+    if (!ok) return;
+    try {
+      await api.dropDatabase(activeConnectionId as string, name);
+      setActiveDatabase(undefined);
+      await qc.invalidateQueries({
+        queryKey: ['connections', activeConnectionId, 'databases'],
+      });
+      await qc.invalidateQueries({
+        queryKey: ['connections', activeConnectionId, 'schema'],
+      });
+      toast.success(`Dropped database ${name}`);
+    } catch (err) {
+      toast.error('Drop failed', {
+        description: err instanceof ApiError ? err.message : String(err),
+      });
+    }
+  }
+
   async function handleTruncate(table: string, tableSchema?: string) {
-    if (!window.confirm(`Truncate "${table}"? This deletes all of its rows.`))
-      return;
+    const ok = await confirm({
+      title: `Truncate “${table}”?`,
+      description: 'This deletes all rows in the table. This cannot be undone.',
+      confirmText: 'Truncate',
+      destructive: true,
+    });
+    if (!ok) return;
     try {
       await api.truncateTable(
         activeConnectionId as string,
@@ -223,7 +259,7 @@ export function SchemaTree() {
             value={activeDatabase ?? schema?.database ?? ''}
             onValueChange={setActiveDatabase}
           >
-            <SelectTrigger className="h-8 text-xs">
+            <SelectTrigger className="h-8 flex-1 text-xs">
               <Database className="mr-1 h-3.5 w-3.5" />
               <SelectValue placeholder="Database" />
             </SelectTrigger>
@@ -236,15 +272,39 @@ export function SchemaTree() {
             </SelectContent>
           </Select>
           {canManageDb && (
-            <Button
-              variant="outline"
-              size="icon"
-              className="h-8 w-8 shrink-0"
-              title="New database"
-              onClick={() => setCreateDbOpen(true)}
-            >
-              <Plus className="h-4 w-4" />
-            </Button>
+            <DropdownMenu>
+              <DropdownMenuTrigger asChild>
+                <Button
+                  variant="outline"
+                  size="icon"
+                  className="h-8 w-8 shrink-0"
+                  title="Database actions"
+                >
+                  <MoreVertical className="h-4 w-4" />
+                </Button>
+              </DropdownMenuTrigger>
+              <DropdownMenuContent align="end">
+                <DropdownMenuItem onClick={() => setCreateDbOpen(true)}>
+                  <Plus className="mr-2 h-4 w-4" /> New database…
+                </DropdownMenuItem>
+                {(activeDatabase ?? schema?.database) && (
+                  <>
+                    <DropdownMenuSeparator />
+                    <DropdownMenuItem
+                      className="text-destructive focus:text-destructive"
+                      onClick={() =>
+                        handleDropDatabase(
+                          (activeDatabase ?? schema?.database) as string,
+                        )
+                      }
+                    >
+                      <Trash2 className="mr-2 h-4 w-4" /> Drop “
+                      {activeDatabase ?? schema?.database}”…
+                    </DropdownMenuItem>
+                  </>
+                )}
+              </DropdownMenuContent>
+            </DropdownMenu>
           )}
         </div>
       )}
