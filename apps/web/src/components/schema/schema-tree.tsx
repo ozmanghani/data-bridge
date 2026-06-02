@@ -13,6 +13,7 @@ import {
   KeyRound,
   Loader2,
   MoreHorizontal,
+  MoreVertical,
   Plus,
   Search,
   SquareTerminal,
@@ -186,6 +187,30 @@ export function SchemaTree() {
     }
   }
 
+  async function handleDropDatabase(name: string) {
+    if (
+      !window.confirm(
+        `Drop database “${name}”? This permanently deletes the database and ALL of its data.`,
+      )
+    )
+      return;
+    try {
+      await api.dropDatabase(activeConnectionId as string, name);
+      setActiveDatabase(undefined);
+      await qc.invalidateQueries({
+        queryKey: ['connections', activeConnectionId, 'databases'],
+      });
+      await qc.invalidateQueries({
+        queryKey: ['connections', activeConnectionId, 'schema'],
+      });
+      toast.success(`Dropped database ${name}`);
+    } catch (err) {
+      toast.error('Drop failed', {
+        description: err instanceof ApiError ? err.message : String(err),
+      });
+    }
+  }
+
   async function handleTruncate(table: string, tableSchema?: string) {
     if (!window.confirm(`Truncate "${table}"? This deletes all of its rows.`))
       return;
@@ -223,7 +248,7 @@ export function SchemaTree() {
             value={activeDatabase ?? schema?.database ?? ''}
             onValueChange={setActiveDatabase}
           >
-            <SelectTrigger className="h-8 text-xs">
+            <SelectTrigger className="h-8 flex-1 text-xs">
               <Database className="mr-1 h-3.5 w-3.5" />
               <SelectValue placeholder="Database" />
             </SelectTrigger>
@@ -236,15 +261,39 @@ export function SchemaTree() {
             </SelectContent>
           </Select>
           {canManageDb && (
-            <Button
-              variant="outline"
-              size="icon"
-              className="h-8 w-8 shrink-0"
-              title="New database"
-              onClick={() => setCreateDbOpen(true)}
-            >
-              <Plus className="h-4 w-4" />
-            </Button>
+            <DropdownMenu>
+              <DropdownMenuTrigger asChild>
+                <Button
+                  variant="outline"
+                  size="icon"
+                  className="h-8 w-8 shrink-0"
+                  title="Database actions"
+                >
+                  <MoreVertical className="h-4 w-4" />
+                </Button>
+              </DropdownMenuTrigger>
+              <DropdownMenuContent align="end">
+                <DropdownMenuItem onClick={() => setCreateDbOpen(true)}>
+                  <Plus className="mr-2 h-4 w-4" /> New database…
+                </DropdownMenuItem>
+                {(activeDatabase ?? schema?.database) && (
+                  <>
+                    <DropdownMenuSeparator />
+                    <DropdownMenuItem
+                      className="text-destructive focus:text-destructive"
+                      onClick={() =>
+                        handleDropDatabase(
+                          (activeDatabase ?? schema?.database) as string,
+                        )
+                      }
+                    >
+                      <Trash2 className="mr-2 h-4 w-4" /> Drop “
+                      {activeDatabase ?? schema?.database}”…
+                    </DropdownMenuItem>
+                  </>
+                )}
+              </DropdownMenuContent>
+            </DropdownMenu>
           )}
         </div>
       )}
