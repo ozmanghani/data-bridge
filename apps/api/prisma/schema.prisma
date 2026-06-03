@@ -31,3 +31,81 @@ model Connection {
 
   @@map("connections")
 }
+
+// ─────────────────────────────────────────────────────────────────────────────
+//  Automation hooks
+//
+//  A Hook reads rows from a connected database (table or query) and POSTs each
+//  one to an HTTP endpoint with a templated payload. Nested config objects are
+//  stored as JSON strings (SQLite has no JSON columns), mirroring `optionsJson`.
+//  The destination's auth secret is the only sensitive field and is encrypted at
+//  rest in `authEnc`, exactly like a connection password.
+// ─────────────────────────────────────────────────────────────────────────────
+
+model Hook {
+  id              String   @id
+  name            String
+  connectionId    String   @map("connection_id")
+  sourceJson      String   @map("source_json")
+  destinationJson String   @map("destination_json") // auth secret stripped
+  authEnc         String?  @map("auth_enc")          // encrypted secret material only
+  transformJson   String   @map("transform_json")
+  deliveryJson    String   @map("delivery_json")
+  enabled         Boolean  @default(true)
+  createdAt       DateTime @default(now()) @map("created_at")
+  updatedAt       DateTime @updatedAt @map("updated_at")
+
+  runs HookRun[]
+
+  @@index([connectionId])
+  @@map("hooks")
+}
+
+model HookRun {
+  id     String @id
+  hookId String @map("hook_id")
+  // 'queued' | 'running' | 'completed' | 'failed' | 'canceling' | 'canceled' | 'interrupted'
+  status String
+
+  // Resumable progress.
+  cursorOffset Int  @default(0) @map("cursor_offset") // next source offset on resume
+  sentCount    Int  @default(0) @map("sent_count")
+  failedCount  Int  @default(0) @map("failed_count")
+  totalCount   Int? @map("total_count") // best-effort; may be null
+
+  // Resolved config captured at start (auth still encrypted) so editing/deleting
+  // the Hook mid-run cannot corrupt or leak the in-flight run.
+  configSnapshotJson String  @map("config_snapshot_json")
+  error              String?
+
+  startedAt  DateTime  @default(now()) @map("started_at")
+  finishedAt DateTime? @map("finished_at")
+
+  hook       Hook           @relation(fields: [hookId], references: [id], onDelete: Cascade)
+  deliveries HookDelivery[]
+
+  @@index([hookId])
+  @@index([status])
+  @@map("hook_runs")
+}
+
+model HookDelivery {
+  id              String   @id
+  runId           String   @map("run_id")
+  sequence        Int // monotonic per run — also the idempotency key
+  rowIndex        Int      @map("row_index") // first row index in this delivery
+  rowCount        Int      @map("row_count") // 1, or batchSize
+  status          String // 'success' | 'failed'
+  httpStatus      Int?     @map("http_status")
+  attempts        Int      @default(0)
+  error           String?
+  responseSnippet String?  @map("response_snippet") // truncated to ~2KB
+  durationMs      Int?     @map("duration_ms")
+  createdAt       DateTime @default(now()) @map("created_at")
+
+  run HookRun @relation(fields: [runId], references: [id], onDelete: Cascade)
+
+  @@unique([runId, sequence]) // idempotency guard for resume / stalled-job recovery
+  @@index([runId])
+  @@map("hook_deliveries")
+}

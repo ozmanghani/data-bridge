@@ -400,7 +400,8 @@ export abstract class BaseSqlAdapter implements DatabaseAdapter {
     const schema = await this.getSchema();
     let tables = schema.namespaces.flatMap((ns) => ns.tables);
     tables = tables.filter((t) => t.kind === 'table');
-    if (opts.schema) tables = tables.filter((t) => (t.schema ?? '') === opts.schema);
+    if (opts.schema)
+      tables = tables.filter((t) => (t.schema ?? '') === opts.schema);
     if (opts.tables?.length) {
       const wanted = new Set(opts.tables);
       tables = tables.filter((t) => wanted.has(t.name));

@@ -5,10 +5,21 @@ import type { RelationKind } from '@relay/core';
 
 export type StudioTab = 'data' | 'query' | 'structure' | 'diagram';
 
+/** Top-level app surface: the database browser vs. the automation tool. */
+export type AppMode = 'browse' | 'automations';
+
 export interface SelectedRelation {
   schema?: string;
   table: string;
   kind: RelationKind;
+}
+
+/** Prefill payload when opening the hook editor (e.g. from the schema tree). */
+export interface HookEditorSeed {
+  connectionId: string;
+  database?: string;
+  schema?: string;
+  table: string;
 }
 
 export interface QueryTab {
@@ -26,6 +37,7 @@ function freshTabs(): { tabs: QueryTab[]; activeId: string } {
 }
 
 interface StudioState {
+  appMode: AppMode;
   activeConnectionId: string | null;
   activeDatabase?: string;
   selected: SelectedRelation | null;
@@ -34,14 +46,24 @@ interface StudioState {
   /** Connection editor dialog state. */
   dialog: { open: boolean; editingId: string | null };
 
+  /** Automations surface: the currently selected hook. */
+  selectedHookId: string | null;
+  /** Hook editor dialog: open + which hook (null = new) + optional prefill. */
+  hookEditor: { open: boolean; editingId: string | null; seed: HookEditorSeed | null };
+
   /** Query editor tabs, lifted here so they survive view switches. */
   queryTabs: QueryTab[];
   activeQueryTabId: string;
 
+  setAppMode: (mode: AppMode) => void;
   setActiveConnection: (id: string | null) => void;
   setActiveDatabase: (db?: string) => void;
   selectRelation: (rel: SelectedRelation) => void;
   setTab: (tab: StudioTab) => void;
+
+  selectHook: (id: string | null) => void;
+  openHookEditor: (opts?: { editingId?: string | null; seed?: HookEditorSeed }) => void;
+  closeHookEditor: () => void;
 
   addQueryTab: (opts?: { sql?: string; name?: string }) => void;
   closeQueryTab: (id: string) => void;
@@ -57,13 +79,31 @@ interface StudioState {
 const initial = freshTabs();
 
 export const useStudio = create<StudioState>((set) => ({
+  appMode: 'browse',
   activeConnectionId: null,
   activeDatabase: undefined,
   selected: null,
   tab: 'data',
   dialog: { open: false, editingId: null },
+  selectedHookId: null,
+  hookEditor: { open: false, editingId: null, seed: null },
   queryTabs: initial.tabs,
   activeQueryTabId: initial.activeId,
+
+  setAppMode: (mode) => set({ appMode: mode }),
+
+  selectHook: (id) => set({ selectedHookId: id }),
+  openHookEditor: (opts) =>
+    set({
+      appMode: 'automations',
+      hookEditor: {
+        open: true,
+        editingId: opts?.editingId ?? null,
+        seed: opts?.seed ?? null,
+      },
+    }),
+  closeHookEditor: () =>
+    set({ hookEditor: { open: false, editingId: null, seed: null } }),
 
   setActiveConnection: (id) => {
     const f = freshTabs();

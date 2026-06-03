@@ -8,6 +8,8 @@ import {
 import type {
   BrowseParams,
   ConnectionInputDTO,
+  HookInputDTO,
+  HookRun,
 } from '@relay/core';
 import { api } from './api';
 
@@ -20,6 +22,12 @@ export const queryKeys = {
     ['connections', id, 'schema', database ?? 'default'] as const,
   browse: (id: string, database: string | undefined, params: BrowseParams) =>
     ['connections', id, 'browse', database ?? 'default', params] as const,
+  hooks: ['hooks'] as const,
+  hook: (id: string) => ['hooks', id] as const,
+  hookRuns: (id: string) => ['hooks', id, 'runs'] as const,
+  hookRun: (id: string, runId: string) => ['hooks', id, 'runs', runId] as const,
+  hookDeliveries: (id: string, runId: string) =>
+    ['hooks', id, 'runs', runId, 'deliveries'] as const,
 };
 
 export function useDrivers() {
@@ -91,5 +99,89 @@ export function useBrowse(
     queryFn: () => api.browse(id as string, params as BrowseParams, database),
     enabled: !!id && !!params,
     placeholderData: (prev) => prev,
+  });
+}
+
+/* ----- automation hooks ----- */
+
+export function useHooks() {
+  return useQuery({
+    queryKey: queryKeys.hooks,
+    queryFn: () => api.listHooks(),
+  });
+}
+
+export function useCreateHook() {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: (input: HookInputDTO) => api.createHook(input),
+    onSuccess: () => qc.invalidateQueries({ queryKey: queryKeys.hooks }),
+  });
+}
+
+export function useUpdateHook() {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: ({ id, input }: { id: string; input: HookInputDTO }) =>
+      api.updateHook(id, input),
+    onSuccess: () => qc.invalidateQueries({ queryKey: queryKeys.hooks }),
+  });
+}
+
+export function useDeleteHook() {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: (id: string) => api.deleteHook(id),
+    onSuccess: () => qc.invalidateQueries({ queryKey: queryKeys.hooks }),
+  });
+}
+
+export function useStartHookRun(hookId: string) {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: (resumeRunId?: string) => api.startHookRun(hookId, resumeRunId),
+    onSuccess: () =>
+      qc.invalidateQueries({ queryKey: queryKeys.hookRuns(hookId) }),
+  });
+}
+
+export function useCancelHookRun(hookId: string) {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: (runId: string) => api.cancelHookRun(hookId, runId),
+    onSuccess: () =>
+      qc.invalidateQueries({ queryKey: queryKeys.hookRuns(hookId) }),
+  });
+}
+
+/** Live-polls while any run is still active. */
+export function useHookRuns(hookId: string | null) {
+  return useQuery({
+    queryKey: hookId ? queryKeys.hookRuns(hookId) : ['hookRuns', 'none'],
+    queryFn: () => api.listHookRuns(hookId as string),
+    enabled: !!hookId,
+    refetchInterval: (query) => {
+      const runs = query.state.data as HookRun[] | undefined;
+      const active = runs?.some((r) =>
+        ['queued', 'running', 'canceling'].includes(r.status),
+      );
+      return active ? 1500 : false;
+    },
+  });
+}
+
+export function useHookDeliveries(
+  hookId: string | null,
+  runId: string | null,
+  live: boolean,
+) {
+  return useQuery({
+    queryKey:
+      hookId && runId
+        ? queryKeys.hookDeliveries(hookId, runId)
+        : ['hookDeliveries', 'none'],
+    queryFn: () => api.listHookDeliveries(hookId as string, runId as string, { limit: 500 }),
+    enabled: !!hookId && !!runId,
+    refetchInterval: live ? 1500 : false,
   });
 }

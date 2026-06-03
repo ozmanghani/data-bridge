@@ -11,6 +11,12 @@ import type {
   DatabaseSchema,
   DeleteRowParams,
   DriverInfo,
+  Hook,
+  HookDelivery,
+  HookInputDTO,
+  HookPreview,
+  HookPreviewDTO,
+  HookRun,
   InsertRowParams,
   QueryResult,
   UpdateRowParams,
@@ -182,6 +188,46 @@ export const api = {
       `/connections/${id}/restore${dbQuery(database)}`,
       { method: 'POST', ...jsonBody(body) },
     ),
+
+  /* ----- automation hooks ----- */
+
+  listHooks: () => request<Hook[]>('/hooks'),
+  getHook: (id: string) => request<Hook>(`/hooks/${id}`),
+  createHook: (input: HookInputDTO) =>
+    request<Hook>('/hooks', { method: 'POST', ...jsonBody(input) }),
+  updateHook: (id: string, input: HookInputDTO) =>
+    request<Hook>(`/hooks/${id}`, { method: 'PUT', ...jsonBody(input) }),
+  deleteHook: (id: string) =>
+    request<{ id: string }>(`/hooks/${id}`, { method: 'DELETE' }),
+  previewHook: (id: string, body: HookPreviewDTO) =>
+    request<HookPreview>(`/hooks/${id}/preview`, {
+      method: 'POST',
+      ...jsonBody(body),
+    }),
+  startHookRun: (id: string, resumeRunId?: string) =>
+    request<HookRun>(`/hooks/${id}/runs`, {
+      method: 'POST',
+      ...jsonBody({ resumeRunId }),
+    }),
+  listHookRuns: (id: string) => request<HookRun[]>(`/hooks/${id}/runs`),
+  getHookRun: (id: string, runId: string) =>
+    request<HookRun>(`/hooks/${id}/runs/${runId}`),
+  cancelHookRun: (id: string, runId: string) =>
+    request<HookRun>(`/hooks/${id}/runs/${runId}/cancel`, { method: 'POST' }),
+  listHookDeliveries: (
+    id: string,
+    runId: string,
+    opts: { status?: 'success' | 'failed'; offset?: number; limit?: number } = {},
+  ) => {
+    const q = new URLSearchParams();
+    if (opts.status) q.set('status', opts.status);
+    if (opts.offset != null) q.set('offset', String(opts.offset));
+    if (opts.limit != null) q.set('limit', String(opts.limit));
+    const qs = q.toString();
+    return request<HookDelivery[]>(
+      `/hooks/${id}/runs/${runId}/deliveries${qs ? `?${qs}` : ''}`,
+    );
+  },
 };
 
 function dbQuery(database?: string): string {

@@ -1,0 +1,25 @@
+# Local infrastructure for Relay's automation hooks.
+#
+#   docker compose up -d redis
+#
+# Redis backs the BullMQ queue that executes hook runs durably (jobs survive an
+# API restart and auto-resume). The database studio, hook CRUD and payload
+# preview do not need Redis — only *running* a hook does.
+services:
+  redis:
+    image: redis:7-alpine
+    container_name: relay-redis
+    restart: unless-stopped
+    ports:
+      - '6379:6379'
+    command: ['redis-server', '--save', '60', '1', '--appendonly', 'yes']
+    volumes:
+      - relay-redis-data:/data
+    healthcheck:
+      test: ['CMD', 'redis-cli', 'ping']
+      interval: 5s
+      timeout: 3s
+      retries: 5
+
+volumes:
+  relay-redis-data:

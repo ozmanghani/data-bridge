@@ -7,6 +7,7 @@
 export * from './adapters/types';
 export * from './errors';
 export * from './validation';
+export * from './hooks';
 
 // Type-only re-exports of the driver metadata (no driver implementations are
 // pulled in, so this stays safe for the browser bundle).

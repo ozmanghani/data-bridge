@@ -38,6 +38,13 @@ Prefer hot-reload while hacking?
 pnpm dev         # same setup, watch-mode on both sides
 ```
 
+**Running automation hooks** needs a Redis instance for the durable job queue
+(browsing, querying, and creating/previewing hooks do not):
+
+```bash
+docker compose up -d redis   # or set REDIS_URL to an existing Redis
+```
+
 ## Features
 
 🔌 **Many engines, one interface** — relational and NoSQL behind a single,
@@ -62,6 +69,14 @@ create / drop databases.
 table (portable **JSON** for any engine, or a **`.sql`** script for relational
 engines), and restore straight from a file.
 
+🪝 **Automations** — turn any table or query into a **webhook**. Create a hook
+that streams every row to an HTTP endpoint (one-by-one or batched), shape the
+body with a safe **token template** (`{{column}}`, `{{$row}}`, `{{$table}}`,
+`{{$now}}`, `{{$index}}`), and add headers + an encrypted auth secret. Runs are
+**durable** (BullMQ + Redis), **resumable** after a crash, **cancellable**, and
+rate-limited, with automatic retries/backoff and a per-delivery log. See the
+**Automations** tab in the sidebar, or right-click a table → _Create automation_.
+
 🎨 **Designed to live in** — shadcn/ui, light & dark themes, resizable panels,
 keyboard-friendly, and quiet.
 
@@ -78,6 +93,7 @@ relay/
 ├─ apps/
 │  ├─ api/             @relay/api — NestJS backend
 │  │  ├─ connections/    Prisma-backed store · connection pool · controllers
+│  │  ├─ hooks/          automation hooks · BullMQ run processor · delivery
 │  │  ├─ common/         crypto · Zod validation · exception filter
 │  │  └─ prisma/         metadata-store schema + migrations
 │  └─ web/             @relay/web — Next.js 15 frontend (shadcn/ui, TanStack)

@@ -1,0 +1,183 @@
+import {
+  Body,
+  Controller,
+  Delete,
+  Get,
+  Param,
+  Post,
+  Put,
+  Query,
+} from '@nestjs/common';
+import {
+  type Hook,
+  type HookDelivery,
+  type HookInputDTO,
+  type HookPreview,
+  type HookPreviewDTO,
+  type HookRun,
+  type StartRunDTO,
+  hookInputSchema,
+  hookPreviewSchema,
+  renderRow,
+  startRunSchema,
+} from '@relay/core';
+import { AdapterPoolService } from '../connections/adapter-pool.service';
+import { ZodValidationPipe } from '../common/zod-validation.pipe';
+import { DeliveryService } from './delivery.service';
+import { HookRunService } from './hook-run.service';
+import { HookStoreService } from './hook-store.service';
+
+@Controller('hooks')
+export class HooksController {
+  constructor(
+    private readonly store: HookStoreService,
+    private readonly runs: HookRunService,
+    private readonly pool: AdapterPoolService,
+    private readonly delivery: DeliveryService,
+  ) {}
+
+  /* ----- CRUD ----- */
+
+  @Get()
+  list(): Promise<Hook[]> {
+    return this.store.list();
+  }
+
+  @Post()
+  create(
+    @Body(new ZodValidationPipe(hookInputSchema)) dto: HookInputDTO,
+  ): Promise<Hook> {
+    return this.store.create(dto);
+  }
+
+  @Get(':id')
+  get(@Param('id') id: string): Promise<Hook> {
+    return this.store.get(id);
+  }
+
+  @Put(':id')
+  update(
+    @Param('id') id: string,
+    @Body(new ZodValidationPipe(hookInputSchema)) dto: HookInputDTO,
+  ): Promise<Hook> {
+    return this.store.update(id, dto);
+  }
+
+  @Delete(':id')
+  async remove(@Param('id') id: string): Promise<{ id: string }> {
+    await this.store.remove(id);
+    return { id };
+  }
+
+  /* ----- payload preview (no delivery) ----- */
+
+  @Post(':id/preview')
+  async preview(
+    @Param('id') id: string,
+    @Body(new ZodValidationPipe(hookPreviewSchema)) dto: HookPreviewDTO,
+  ): Promise<HookPreview> {
+    const hook = await this.store.resolve(id);
+    const table = hook.source.kind === 'table' ? hook.source.table : '(query)';
+    const now = new Date().toISOString();
+
+    let rows: Record<string, unknown>[];
+    let fromSource: boolean;
+    if (dto.sampleRow) {
+      rows = [dto.sampleRow];
+      fromSource = false;
+    } else {
+      rows = await this.fetchSample(hook.source, dto.limit);
+      fromSource = true;
+    }
+
+    const warnings = new Set<string>();
+    const bodies = rows.map((row, index) => {
+      const result = renderRow(row, hook.transform, { table, now, index });
+      result.warnings.forEach((w) => warnings.add(w));
+      return result.body;
+    });
+
+    return {
+      method: hook.destination.method,
+      url: hook.destination.url,
+      headers: this.delivery.redactedHeaders(hook.destination),
+      bodies,
+      warnings: [...warnings],
+      fromSource,
+    };
+  }
+
+  private async fetchSample(
+    source: Hook['source'],
+    limit: number,
+  ): Promise<Record<string, unknown>[]> {
+    if (source.kind === 'table') {
+      const page = await this.pool.withAdapter(
+        source.connectionId,
+        source.database,
+        (a) =>
+          a.browse({
+            schema: source.schema,
+            table: source.table,
+            filters: source.filters,
+            sort: source.sort,
+            limit,
+            offset: 0,
+          }),
+      );
+      return page.rows;
+    }
+    const result = await this.pool.withAdapter(
+      source.connectionId,
+      source.database,
+      (a) => a.query(source.statement),
+    );
+    return result.rows.slice(0, limit);
+  }
+
+  /* ----- runs ----- */
+
+  @Post(':id/runs')
+  startRun(
+    @Param('id') id: string,
+    @Body(new ZodValidationPipe(startRunSchema)) dto: StartRunDTO,
+  ): Promise<HookRun> {
+    return this.runs.start(id, dto.resumeRunId);
+  }
+
+  @Get(':id/runs')
+  listRuns(@Param('id') id: string): Promise<HookRun[]> {
+    return this.runs.listRuns(id);
+  }
+
+  @Get(':id/runs/:runId')
+  getRun(
+    @Param('id') id: string,
+    @Param('runId') runId: string,
+  ): Promise<HookRun> {
+    return this.runs.getRun(id, runId);
+  }
+
+  @Post(':id/runs/:runId/cancel')
+  cancelRun(
+    @Param('id') id: string,
+    @Param('runId') runId: string,
+  ): Promise<HookRun> {
+    return this.runs.cancel(id, runId);
+  }
+
+  @Get(':id/runs/:runId/deliveries')
+  listDeliveries(
+    @Param('id') _id: string,
+    @Param('runId') runId: string,
+    @Query('status') status?: 'success' | 'failed',
+    @Query('offset') offset?: string,
+    @Query('limit') limit?: string,
+  ): Promise<HookDelivery[]> {
+    return this.runs.listDeliveries(runId, {
+      status: status === 'success' || status === 'failed' ? status : undefined,
+      offset: offset ? Number(offset) : undefined,
+      limit: limit ? Number(limit) : undefined,
+    });
+  }
+}

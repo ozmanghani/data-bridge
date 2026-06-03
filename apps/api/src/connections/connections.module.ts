@@ -1,18 +1,12 @@
 import { Module } from '@nestjs/common';
-import { CryptoService } from '../common/crypto.service';
-import { PrismaService } from '../common/prisma.service';
 import { AdapterPoolService } from './adapter-pool.service';
 import { ConnectionStoreService } from './connection-store.service';
 import { ConnectionsController } from './connections.controller';
 
+// PrismaService + CryptoService come from the global CommonModule.
 @Module({
   controllers: [ConnectionsController],
-  providers: [
-    PrismaService,
-    CryptoService,
-    ConnectionStoreService,
-    AdapterPoolService,
-  ],
+  providers: [ConnectionStoreService, AdapterPoolService],
   exports: [ConnectionStoreService, AdapterPoolService],
 })
 export class ConnectionsModule {}

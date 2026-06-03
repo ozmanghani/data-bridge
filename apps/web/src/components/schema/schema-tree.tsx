@@ -20,6 +20,7 @@ import {
   Table2,
   Trash2,
   Upload,
+  Webhook,
 } from 'lucide-react';
 import { toast } from 'sonner';
 import type { BackupFormat, RelationKind, TableSchema } from '@relay/core';
@@ -72,6 +73,7 @@ export function SchemaTree() {
     selected,
     selectRelation,
     openInQuery,
+    openHookEditor,
   } = useStudio();
   const [filter, setFilter] = useState('');
   const [createTableOpen, setCreateTableOpen] = useState(false);
@@ -453,6 +455,23 @@ export function SchemaTree() {
                           >
                             <SquareTerminal className="mr-2 h-4 w-4" />
                             Open SELECT
+                          </DropdownMenuItem>
+                        )}
+                        {activeConnectionId && (
+                          <DropdownMenuItem
+                            onClick={() =>
+                              openHookEditor({
+                                seed: {
+                                  connectionId: activeConnectionId,
+                                  database: activeDatabase,
+                                  schema: table.schema,
+                                  table: table.name,
+                                },
+                              })
+                            }
+                          >
+                            <Webhook className="mr-2 h-4 w-4" />
+                            Create automation
                           </DropdownMenuItem>
                         )}
                         {backupFormats.length > 0 && (
