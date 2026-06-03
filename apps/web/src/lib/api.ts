@@ -204,10 +204,13 @@ export const api = {
       method: 'POST',
       ...jsonBody(body),
     }),
-  startHookRun: (id: string, resumeRunId?: string) =>
+  startHookRun: (
+    id: string,
+    opts: { resumeRunId?: string; runId?: string; retryFailedOf?: string } = {},
+  ) =>
     request<HookRun>(`/hooks/${id}/runs`, {
       method: 'POST',
-      ...jsonBody({ resumeRunId }),
+      ...jsonBody(opts),
     }),
   listHookRuns: (id: string) => request<HookRun[]>(`/hooks/${id}/runs`),
   getHookRun: (id: string, runId: string) =>
@@ -217,10 +220,18 @@ export const api = {
   listHookDeliveries: (
     id: string,
     runId: string,
-    opts: { status?: 'success' | 'failed'; offset?: number; limit?: number } = {},
+    opts: {
+      status?: 'success' | 'failed' | 'skipped';
+      from?: number;
+      to?: number;
+      offset?: number;
+      limit?: number;
+    } = {},
   ) => {
     const q = new URLSearchParams();
     if (opts.status) q.set('status', opts.status);
+    if (opts.from != null) q.set('from', String(opts.from));
+    if (opts.to != null) q.set('to', String(opts.to));
     if (opts.offset != null) q.set('offset', String(opts.offset));
     if (opts.limit != null) q.set('limit', String(opts.limit));
     const qs = q.toString();
@@ -228,6 +239,11 @@ export const api = {
       `/hooks/${id}/runs/${runId}/deliveries${qs ? `?${qs}` : ''}`,
     );
   },
+  skipHookRun: (id: string, runId: string, sequences: number[]) =>
+    request<{ skipped: number }>(`/hooks/${id}/runs/${runId}/skip`, {
+      method: 'POST',
+      ...jsonBody({ sequences }),
+    }),
 };
 
 function dbQuery(database?: string): string {

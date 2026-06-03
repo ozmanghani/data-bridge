@@ -5,9 +5,6 @@ import type { RelationKind } from '@relay/core';
 
 export type StudioTab = 'data' | 'query' | 'structure' | 'diagram';
 
-/** Top-level app surface: the database browser vs. the automation tool. */
-export type AppMode = 'browse' | 'automations';
-
 export interface SelectedRelation {
   schema?: string;
   table: string;
@@ -37,7 +34,6 @@ function freshTabs(): { tabs: QueryTab[]; activeId: string } {
 }
 
 interface StudioState {
-  appMode: AppMode;
   activeConnectionId: string | null;
   activeDatabase?: string;
   selected: SelectedRelation | null;
@@ -46,24 +42,34 @@ interface StudioState {
   /** Connection editor dialog state. */
   dialog: { open: boolean; editingId: string | null };
 
-  /** Automations surface: the currently selected hook. */
+  /** Hooks surface: the currently selected hook. */
   selectedHookId: string | null;
   /** Hook editor dialog: open + which hook (null = new) + optional prefill. */
-  hookEditor: { open: boolean; editingId: string | null; seed: HookEditorSeed | null };
+  hookEditor: {
+    open: boolean;
+    editingId: string | null;
+    seed: HookEditorSeed | null;
+  };
+  /** The full DB/table management surface (connections, schema, browse, DDL). */
+  dataSourcesOpen: boolean;
 
   /** Query editor tabs, lifted here so they survive view switches. */
   queryTabs: QueryTab[];
   activeQueryTabId: string;
 
-  setAppMode: (mode: AppMode) => void;
   setActiveConnection: (id: string | null) => void;
   setActiveDatabase: (db?: string) => void;
   selectRelation: (rel: SelectedRelation) => void;
   setTab: (tab: StudioTab) => void;
 
   selectHook: (id: string | null) => void;
-  openHookEditor: (opts?: { editingId?: string | null; seed?: HookEditorSeed }) => void;
+  openHookEditor: (opts?: {
+    editingId?: string | null;
+    seed?: HookEditorSeed;
+  }) => void;
   closeHookEditor: () => void;
+  openDataSources: () => void;
+  closeDataSources: () => void;
 
   addQueryTab: (opts?: { sql?: string; name?: string }) => void;
   closeQueryTab: (id: string) => void;
@@ -79,7 +85,6 @@ interface StudioState {
 const initial = freshTabs();
 
 export const useStudio = create<StudioState>((set) => ({
-  appMode: 'browse',
   activeConnectionId: null,
   activeDatabase: undefined,
   selected: null,
@@ -87,15 +92,15 @@ export const useStudio = create<StudioState>((set) => ({
   dialog: { open: false, editingId: null },
   selectedHookId: null,
   hookEditor: { open: false, editingId: null, seed: null },
+  dataSourcesOpen: false,
   queryTabs: initial.tabs,
   activeQueryTabId: initial.activeId,
 
-  setAppMode: (mode) => set({ appMode: mode }),
-
-  selectHook: (id) => set({ selectedHookId: id }),
+  // Selecting a hook and browsing a table are mutually exclusive — the main
+  // view shows the table preview when one is picked, else the hooks workspace.
+  selectHook: (id) => set({ selectedHookId: id, selected: null }),
   openHookEditor: (opts) =>
     set({
-      appMode: 'automations',
       hookEditor: {
         open: true,
         editingId: opts?.editingId ?? null,
@@ -104,6 +109,8 @@ export const useStudio = create<StudioState>((set) => ({
     }),
   closeHookEditor: () =>
     set({ hookEditor: { open: false, editingId: null, seed: null } }),
+  openDataSources: () => set({ dataSourcesOpen: true }),
+  closeDataSources: () => set({ dataSourcesOpen: false }),
 
   setActiveConnection: (id) => {
     const f = freshTabs();
@@ -117,7 +124,8 @@ export const useStudio = create<StudioState>((set) => ({
     });
   },
   setActiveDatabase: (db) => set({ activeDatabase: db, selected: null }),
-  selectRelation: (rel) => set({ selected: rel, tab: 'data' }),
+  selectRelation: (rel) =>
+    set({ selected: rel, tab: 'data', selectedHookId: null }),
   setTab: (tab) => set({ tab }),
 
   addQueryTab: (opts) =>
@@ -154,7 +162,11 @@ export const useStudio = create<StudioState>((set) => ({
       return {
         queryTabs: [
           ...s.queryTabs,
-          { id, name: name ?? `Query ${s.queryTabs.length + 1}`, sql: statement },
+          {
+            id,
+            name: name ?? `Query ${s.queryTabs.length + 1}`,
+            sql: statement,
+          },
         ],
         activeQueryTabId: id,
         tab: 'query',
@@ -163,5 +175,6 @@ export const useStudio = create<StudioState>((set) => ({
 
   openConnectionDialog: (editingId = null) =>
     set({ dialog: { open: true, editingId } }),
-  closeConnectionDialog: () => set({ dialog: { open: false, editingId: null } }),
+  closeConnectionDialog: () =>
+    set({ dialog: { open: false, editingId: null } }),
 }));

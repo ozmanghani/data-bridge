@@ -110,6 +110,15 @@ export const hookPreviewSchema = z.object({
 export const startRunSchema = z.object({
   /** Resume a previously interrupted run instead of starting fresh. */
   resumeRunId: z.string().optional(),
+  /** Start a specific prepared (draft) run. */
+  runId: z.string().optional(),
+  /** Create a new run that re-sends only the failed rows of this run. */
+  retryFailedOf: z.string().optional(),
+});
+
+export const skipSchema = z.object({
+  /** Delivery sequence numbers to skip (only effective while still queued). */
+  sequences: z.array(z.coerce.number().int().min(0)).min(1).max(10_000),
 });
 
 /* -------------------------------------------------------------------------- */
@@ -124,8 +133,10 @@ export type HookDeliveryConfig = z.infer<typeof hookDeliverySchema>;
 export type HookInputDTO = z.infer<typeof hookInputSchema>;
 export type HookPreviewDTO = z.infer<typeof hookPreviewSchema>;
 export type StartRunDTO = z.infer<typeof startRunSchema>;
+export type SkipDTO = z.infer<typeof skipSchema>;
 
 export type HookRunStatus =
+  | 'draft' // prepared & queued in the UI, not yet sending
   | 'queued'
   | 'running'
   | 'completed'
@@ -134,7 +145,7 @@ export type HookRunStatus =
   | 'canceled'
   | 'interrupted';
 
-export type DeliveryStatus = 'success' | 'failed';
+export type DeliveryStatus = 'success' | 'failed' | 'skipped';
 
 /** The hook as returned by the API (secret redacted). */
 export interface Hook {
@@ -156,6 +167,7 @@ export interface HookRun {
   cursorOffset: number;
   sentCount: number;
   failedCount: number;
+  skippedCount: number;
   totalCount: number | null;
   error: string | null;
   startedAt: string;
@@ -172,7 +184,10 @@ export interface HookDelivery {
   httpStatus: number | null;
   attempts: number;
   error: string | null;
-  responseSnippet: string | null;
+  /** The exact JSON body sent for this delivery (capped). */
+  requestBody: string | null;
+  /** The full response text returned by the endpoint (capped). */
+  responseBody: string | null;
   durationMs: number | null;
   createdAt: string;
 }

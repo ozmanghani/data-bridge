@@ -16,9 +16,11 @@ import {
   type HookPreviewDTO,
   type HookRun,
   type StartRunDTO,
+  type SkipDTO,
   hookInputSchema,
   hookPreviewSchema,
   renderRow,
+  skipSchema,
   startRunSchema,
 } from '@relay/core';
 import { AdapterPoolService } from '../connections/adapter-pool.service';
@@ -44,10 +46,13 @@ export class HooksController {
   }
 
   @Post()
-  create(
+  async create(
     @Body(new ZodValidationPipe(hookInputSchema)) dto: HookInputDTO,
   ): Promise<Hook> {
-    return this.store.create(dto);
+    const hook = await this.store.create(dto);
+    // Queue a draft run so the timeline shows the planned deliveries right away.
+    await this.runs.prepare(hook.id).catch(() => undefined);
+    return hook;
   }
 
   @Get(':id')
@@ -56,11 +61,14 @@ export class HooksController {
   }
 
   @Put(':id')
-  update(
+  async update(
     @Param('id') id: string,
     @Body(new ZodValidationPipe(hookInputSchema)) dto: HookInputDTO,
   ): Promise<Hook> {
-    return this.store.update(id, dto);
+    const hook = await this.store.update(id, dto);
+    // Refresh an existing draft so its queued timeline reflects the new config.
+    await this.runs.prepare(id, { onlyExisting: true }).catch(() => undefined);
+    return hook;
   }
 
   @Delete(':id')
@@ -142,7 +150,7 @@ export class HooksController {
     @Param('id') id: string,
     @Body(new ZodValidationPipe(startRunSchema)) dto: StartRunDTO,
   ): Promise<HookRun> {
-    return this.runs.start(id, dto.resumeRunId);
+    return this.runs.start(id, dto);
   }
 
   @Get(':id/runs')
@@ -170,14 +178,29 @@ export class HooksController {
   listDeliveries(
     @Param('id') _id: string,
     @Param('runId') runId: string,
-    @Query('status') status?: 'success' | 'failed',
+    @Query('status') status?: string,
+    @Query('from') from?: string,
+    @Query('to') to?: string,
     @Query('offset') offset?: string,
     @Query('limit') limit?: string,
   ): Promise<HookDelivery[]> {
+    const valid = status === 'success' || status === 'failed' || status === 'skipped';
     return this.runs.listDeliveries(runId, {
-      status: status === 'success' || status === 'failed' ? status : undefined,
+      status: valid ? (status as 'success' | 'failed' | 'skipped') : undefined,
+      from: from != null ? Number(from) : undefined,
+      to: to != null ? Number(to) : undefined,
       offset: offset ? Number(offset) : undefined,
       limit: limit ? Number(limit) : undefined,
     });
+  }
+
+  @Post(':id/runs/:runId/skip')
+  async skip(
+    @Param('id') _id: string,
+    @Param('runId') runId: string,
+    @Body(new ZodValidationPipe(skipSchema)) dto: SkipDTO,
+  ): Promise<{ skipped: number }> {
+    const skipped = await this.runs.skipDeliveries(runId, dto.sequences);
+    return { skipped };
   }
 }

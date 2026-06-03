@@ -139,7 +139,9 @@ export function useDeleteHook() {
 export function useStartHookRun(hookId: string) {
   const qc = useQueryClient();
   return useMutation({
-    mutationFn: (resumeRunId?: string) => api.startHookRun(hookId, resumeRunId),
+    mutationFn: (
+      opts: { resumeRunId?: string; runId?: string; retryFailedOf?: string } = {},
+    ) => api.startHookRun(hookId, opts),
     onSuccess: () =>
       qc.invalidateQueries({ queryKey: queryKeys.hookRuns(hookId) }),
   });
@@ -174,14 +176,31 @@ export function useHookDeliveries(
   hookId: string | null,
   runId: string | null,
   live: boolean,
+  opts: { status?: 'success' | 'failed' | 'skipped'; from?: number; to?: number } = {},
 ) {
   return useQuery({
     queryKey:
       hookId && runId
-        ? queryKeys.hookDeliveries(hookId, runId)
+        ? [...queryKeys.hookDeliveries(hookId, runId), opts]
         : ['hookDeliveries', 'none'],
-    queryFn: () => api.listHookDeliveries(hookId as string, runId as string, { limit: 500 }),
+    queryFn: () =>
+      api.listHookDeliveries(hookId as string, runId as string, {
+        ...opts,
+        limit: 2000,
+      }),
     enabled: !!hookId && !!runId,
     refetchInterval: live ? 1500 : false,
+  });
+}
+
+export function useSkipDeliveries(hookId: string, runId: string) {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: (sequences: number[]) =>
+      api.skipHookRun(hookId, runId, sequences),
+    onSuccess: () => {
+      qc.invalidateQueries({ queryKey: queryKeys.hookDeliveries(hookId, runId) });
+      qc.invalidateQueries({ queryKey: queryKeys.hookRuns(hookId) });
+    },
   });
 }

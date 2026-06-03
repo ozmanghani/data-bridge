@@ -27,7 +27,8 @@ export interface DeliveryOutcome {
   httpStatus: number | null;
   attempts: number;
   error: string | null;
-  responseSnippet: string | null;
+  requestBody: string | null;
+  responseBody: string | null;
   durationMs: number;
 }
 

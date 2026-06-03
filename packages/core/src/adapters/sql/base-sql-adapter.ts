@@ -144,6 +144,15 @@ export abstract class BaseSqlAdapter implements DatabaseAdapter {
         case 'endsWith':
           params.push(`%${String(f.value ?? '')}`);
           return `${col} ${this.likeKeyword()} ${this.placeholder(idx++)}`;
+        case 'in': {
+          const values = Array.isArray(f.value) ? f.value : [];
+          if (values.length === 0) return '1 = 0'; // matches nothing
+          const placeholders = values.map((v) => {
+            params.push(v);
+            return this.placeholder(idx++);
+          });
+          return `${col} IN (${placeholders.join(', ')})`;
+        }
         default:
           throw new BadRequestError(
             `Unsupported filter operator: ${String(f.operator)}`,

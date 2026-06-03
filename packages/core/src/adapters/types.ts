@@ -195,7 +195,8 @@ export type FilterOperator =
   | 'startsWith'
   | 'endsWith'
   | 'isNull'
-  | 'notNull';
+  | 'notNull'
+  | 'in';
 
 export interface FilterSpec {
   column: string;

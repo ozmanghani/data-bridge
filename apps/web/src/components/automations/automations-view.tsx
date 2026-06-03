@@ -26,7 +26,7 @@ export function AutomationsView() {
       <div className="flex h-full flex-col items-center justify-center gap-3 text-center text-muted-foreground">
         <Webhook className="h-10 w-10 opacity-40" />
         <div>
-          <p className="text-sm">No automation selected</p>
+          <p className="text-sm">No hook selected</p>
           <p className="text-xs">
             Pick a hook on the left, or{' '}
             <button
@@ -42,9 +42,18 @@ export function AutomationsView() {
     );
   }
 
-  return <HookPanel key={hook.id} hookId={hook.id} hookName={hook.name} sourceLabel={
-    hook.source.kind === 'table' ? hook.source.table : 'custom query'
-  } destLabel={`${hook.destination.method} ${hook.destination.url}`} onDeleted={() => selectHook(null)} />;
+  return (
+    <HookPanel
+      key={hook.id}
+      hookId={hook.id}
+      hookName={hook.name}
+      sourceLabel={hook.source.kind === 'table' ? hook.source.table : 'custom query'}
+      destLabel={`${hook.destination.method} ${hook.destination.url}`}
+      batchSize={hook.delivery.batchSize}
+      endpoint={{ url: hook.destination.url, method: hook.destination.method }}
+      onDeleted={() => selectHook(null)}
+    />
+  );
 }
 
 function HookPanel({
@@ -52,12 +61,16 @@ function HookPanel({
   hookName,
   sourceLabel,
   destLabel,
+  batchSize,
+  endpoint,
   onDeleted,
 }: {
   hookId: string;
   hookName: string;
   sourceLabel: string;
   destLabel: string;
+  batchSize: number;
+  endpoint: { url: string; method: string };
   onDeleted: () => void;
 }) {
   const confirm = useConfirm();
@@ -82,7 +95,7 @@ function HookPanel({
 
   async function handleRun() {
     try {
-      const run = await start.mutateAsync(undefined);
+      const run = await start.mutateAsync({});
       setSelectedRunId(run.id);
       toast.success('Run started');
     } catch (err) {
@@ -171,9 +184,14 @@ function HookPanel({
       </div>
 
       {/* Selected run */}
-      <div className="min-h-0 flex-1">
+      <div className="flex min-h-0 flex-1 flex-col">
         {selectedRun ? (
-          <RunDetail hookId={hookId} run={selectedRun} />
+          <RunDetail
+            hookId={hookId}
+            run={selectedRun}
+            batchSize={batchSize}
+            endpoint={endpoint}
+          />
         ) : (
           <div className="flex h-full items-center justify-center text-sm text-muted-foreground">
             Select a run to see its delivery log.

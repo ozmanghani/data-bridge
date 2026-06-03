@@ -75,18 +75,28 @@ export class HookRunProcessor extends WorkerHost {
     const { delivery } = hook;
     const batchSize = delivery.batchSize;
     const table = hook.source.kind === 'table' ? hook.source.table : '(query)';
-    const done = await this.runs.succeededSequences(runId);
+    // The single-column primary key (if any) is stored per delivery so failed
+    // rows can later be retried precisely.
+    const pkColumn =
+      hook.source.kind === 'table' ? await this.resolvePk(hook.source) : null;
+    // Sequences we must not (re)send: already delivered, or skipped.
+    const done = await this.runs.settledSequences(runId);
 
-    // Cancellation works across processes: any worker may own the job, so the
-    // local abort signal alone isn't authoritative. Poll the run status too,
-    // throttled to keep DB load negligible on high-throughput runs.
-    let lastStatusCheck = 0;
+    // Control polling is throttled to keep DB load negligible on big runs. It
+    // serves two cross-process signals: cancellation (any worker may own the
+    // job) and newly-queued skips (the UI can skip a row before we reach it).
+    let lastControlCheck = 0;
     const stopRequested = async (): Promise<boolean> => {
       if (signal.aborted) return true;
       const now = Date.now();
-      if (now - lastStatusCheck < 750) return false;
-      lastStatusCheck = now;
-      return this.runs.cancelRequested(runId);
+      if (now - lastControlCheck < 750) return false;
+      lastControlCheck = now;
+      const [cancel, skips] = await Promise.all([
+        this.runs.cancelRequested(runId),
+        this.runs.skippedSequences(runId),
+      ]);
+      for (const s of skips) done.add(s);
+      return cancel;
     };
 
     let buffer: Record<string, unknown>[] = [];
@@ -100,7 +110,7 @@ export class HookRunProcessor extends WorkerHost {
         }
         buffer.push(item.row);
         if (buffer.length === batchSize) {
-          const stop = await this.flush(runId, table, buffer, bufferStart, done, hook, signal);
+          const stop = await this.flush(runId, table, buffer, bufferStart, done, hook, pkColumn, signal);
           buffer = [];
           bufferStart = item.index + 1;
           await this.runs.setCursor(runId, bufferStart);
@@ -117,7 +127,7 @@ export class HookRunProcessor extends WorkerHost {
           await this.runs.finalize(runId, 'canceled');
           return;
         }
-        const stop = await this.flush(runId, table, buffer, bufferStart, done, hook, signal);
+        const stop = await this.flush(runId, table, buffer, bufferStart, done, hook, pkColumn, signal);
         if (stop) {
           await this.runs.finalize(runId, 'failed', 'Stopped after a failed delivery (onError=abort).');
           return;
@@ -144,6 +154,7 @@ export class HookRunProcessor extends WorkerHost {
     startIndex: number,
     done: Set<number>,
     hook: ResolvedHook,
+    pkColumn: string | null,
     signal: AbortSignal,
   ): Promise<boolean> {
     const batchSize = hook.delivery.batchSize;
@@ -163,12 +174,23 @@ export class HookRunProcessor extends WorkerHost {
       signal,
       `${runId}:${sequence}`,
     );
+    const rowKeys = pkColumn ? rows.map((r) => r[pkColumn]) : null;
     await this.runs.recordDelivery(
       runId,
-      { sequence, rowIndex: startIndex, rowCount: rows.length },
+      { sequence, rowIndex: startIndex, rowCount: rows.length, rowKeys },
       outcome,
     );
     return outcome.status === 'failed' && hook.delivery.onError === 'abort';
+  }
+
+  /** The single-column primary key of a table source, if any. */
+  private async resolvePk(
+    source: Extract<ResolvedHook['source'], { kind: 'table' }>,
+  ): Promise<string | null> {
+    const probe = await this.pool.withAdapter(source.connectionId, source.database, (a) =>
+      a.browse({ schema: source.schema, table: source.table, limit: 1, offset: 0 }),
+    );
+    return probe.primaryKey.length === 1 ? probe.primaryKey[0]! : null;
   }
 
   /* ----- row streaming ----- */

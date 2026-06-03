@@ -471,7 +471,7 @@ export function SchemaTree() {
                             }
                           >
                             <Webhook className="mr-2 h-4 w-4" />
-                            Create automation
+                            Create hook
                           </DropdownMenuItem>
                         )}
                         {backupFormats.length > 0 && (

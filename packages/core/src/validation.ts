@@ -40,6 +40,7 @@ export const filterSchema = z.object({
     'endsWith',
     'isNull',
     'notNull',
+    'in',
   ]),
   value: z.unknown().optional(),
 });

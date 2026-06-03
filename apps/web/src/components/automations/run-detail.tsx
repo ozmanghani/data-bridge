@@ -1,15 +1,16 @@
 'use client';
 
-import { Loader2, Ban, RotateCcw } from 'lucide-react';
+import { Ban, Loader2, RotateCcw } from 'lucide-react';
 import { toast } from 'sonner';
 import type { HookRun, HookRunStatus } from '@relay/core';
 import { ApiError } from '@/lib/api';
 import { useCancelHookRun, useStartHookRun } from '@/lib/queries';
 import { cn } from '@/lib/utils';
 import { Button } from '@/components/ui/button';
-import { DeliveryLog } from './delivery-log';
+import { DeliveryMonitor } from './delivery-log';
 
 const STATUS_STYLES: Record<HookRunStatus, string> = {
+  draft: 'bg-muted text-muted-foreground',
   queued: 'bg-muted text-muted-foreground',
   running: 'bg-sky-500/15 text-sky-600 dark:text-sky-400',
   completed: 'bg-emerald-500/15 text-emerald-600 dark:text-emerald-400',
@@ -23,7 +24,7 @@ export function RunStatusBadge({ status }: { status: HookRunStatus }) {
   return (
     <span
       className={cn(
-        'inline-flex items-center gap-1 rounded-full px-2 py-0.5 text-xs font-medium',
+        'inline-flex items-center gap-1 rounded-full px-2 py-0.5 text-xs font-medium capitalize',
         STATUS_STYLES[status],
       )}
     >
@@ -38,14 +39,57 @@ export function RunStatusBadge({ status }: { status: HookRunStatus }) {
 const ACTIVE: HookRunStatus[] = ['queued', 'running', 'canceling'];
 const RESUMABLE: HookRunStatus[] = ['failed', 'canceled', 'interrupted'];
 
-export function RunDetail({ hookId, run }: { hookId: string; run: HookRun }) {
+function Stat({
+  label,
+  value,
+  tone,
+}: {
+  label: string;
+  value: string | number;
+  tone?: 'success' | 'danger' | 'warn' | 'muted';
+}) {
+  return (
+    <div className="bg-card flex flex-col rounded-lg border px-3 py-2">
+      <span className="text-muted-foreground text-[11px] font-medium uppercase tracking-wide">
+        {label}
+      </span>
+      <span
+        className={cn(
+          'text-lg font-semibold tabular-nums',
+          tone === 'success' && 'text-emerald-600 dark:text-emerald-400',
+          tone === 'danger' && 'text-destructive',
+          tone === 'warn' && 'text-amber-600 dark:text-amber-400',
+          tone === 'muted' && 'text-muted-foreground',
+        )}
+      >
+        {value}
+      </span>
+    </div>
+  );
+}
+
+export function RunDetail({
+  hookId,
+  run,
+  batchSize,
+  endpoint,
+}: {
+  hookId: string;
+  run: HookRun;
+  batchSize: number;
+  endpoint: { url: string; method: string };
+}) {
   const cancel = useCancelHookRun(hookId);
-  const resume = useStartHookRun(hookId);
+  const startRun = useStartHookRun(hookId);
 
   const isActive = ACTIVE.includes(run.status);
   const total = run.totalCount;
-  const done = run.sentCount + run.failedCount;
-  const pct = total && total > 0 ? Math.min(100, Math.round((done / total) * 100)) : null;
+  const settled = run.sentCount + run.failedCount + run.skippedCount;
+  const pending = total != null ? Math.max(0, total - settled) : null;
+  const pct = total && total > 0 ? Math.min(100, Math.round((settled / total) * 100)) : null;
+  const attempted = run.sentCount + run.failedCount;
+  const successRate =
+    attempted > 0 ? Math.round((run.sentCount / attempted) * 100) : null;
 
   async function handleCancel() {
     try {
@@ -59,7 +103,7 @@ export function RunDetail({ hookId, run }: { hookId: string; run: HookRun }) {
 
   async function handleResume() {
     try {
-      await resume.mutateAsync(run.id);
+      await startRun.mutateAsync({ resumeRunId: run.id });
       toast.success('Run resumed');
     } catch (err) {
       toast.error('Could not resume', {
@@ -68,37 +112,43 @@ export function RunDetail({ hookId, run }: { hookId: string; run: HookRun }) {
     }
   }
 
+  async function handleRetry() {
+    try {
+      await startRun.mutateAsync({ retryFailedOf: run.id });
+      toast.success('Retrying failed rows with the current config');
+    } catch (err) {
+      toast.error('Could not retry', {
+        description: err instanceof ApiError ? err.message : String(err),
+      });
+    }
+  }
+
+  const canRetry = !isActive && run.failedCount > 0;
+
   return (
     <div className="flex min-h-0 flex-1 flex-col">
-      <div className="flex flex-wrap items-center gap-3 border-b px-4 py-3">
+      {/* Header: status + actions */}
+      <div className="flex items-center gap-3 px-4 pt-3">
         <RunStatusBadge status={run.status} />
-        <div className="flex items-center gap-4 text-sm">
-          <span>
-            <span className="font-medium text-emerald-600">{run.sentCount}</span>{' '}
-            <span className="text-muted-foreground">sent</span>
-          </span>
-          <span>
-            <span className="font-medium text-destructive">{run.failedCount}</span>{' '}
-            <span className="text-muted-foreground">failed</span>
-          </span>
-          <span className="text-muted-foreground">
-            {total != null ? `of ${total}` : 'of ?'}
-          </span>
-          {pct != null && (
-            <span className="text-muted-foreground">· {pct}%</span>
-          )}
-        </div>
-
+        <span className="text-muted-foreground text-xs">
+          started {new Date(run.startedAt).toLocaleString()}
+        </span>
         <div className="ml-auto flex items-center gap-2">
           {isActive && (
+            <Button size="sm" variant="outline" onClick={handleCancel} disabled={cancel.isPending}>
+              <Ban className="mr-1.5 h-3.5 w-3.5" />
+              Cancel
+            </Button>
+          )}
+          {canRetry && (
             <Button
               size="sm"
               variant="outline"
-              onClick={handleCancel}
-              disabled={cancel.isPending}
+              onClick={handleRetry}
+              disabled={startRun.isPending}
             >
-              <Ban className="mr-1.5 h-3.5 w-3.5" />
-              Cancel
+              <RotateCcw className="mr-1.5 h-3.5 w-3.5" />
+              Retry failed ({run.failedCount})
             </Button>
           )}
           {RESUMABLE.includes(run.status) && (
@@ -106,7 +156,7 @@ export function RunDetail({ hookId, run }: { hookId: string; run: HookRun }) {
               size="sm"
               variant="outline"
               onClick={handleResume}
-              disabled={resume.isPending}
+              disabled={startRun.isPending}
             >
               <RotateCcw className="mr-1.5 h-3.5 w-3.5" />
               Resume
@@ -115,23 +165,50 @@ export function RunDetail({ hookId, run }: { hookId: string; run: HookRun }) {
         </div>
       </div>
 
+      {/* Stat cards */}
+      <div className="grid grid-cols-3 gap-2 px-4 py-3 sm:grid-cols-6">
+        <Stat label="Total" value={total != null ? total.toLocaleString() : '—'} />
+        <Stat label="Delivered" value={run.sentCount.toLocaleString()} tone="success" />
+        <Stat label="Failed" value={run.failedCount.toLocaleString()} tone="danger" />
+        <Stat label="Skipped" value={run.skippedCount.toLocaleString()} tone="warn" />
+        <Stat
+          label="Queued"
+          value={pending != null ? pending.toLocaleString() : '—'}
+          tone="muted"
+        />
+        <Stat
+          label="Success"
+          value={successRate != null ? `${successRate}%` : '—'}
+        />
+      </div>
+
+      {/* Progress */}
       {pct != null && (
-        <div className="h-1 w-full bg-muted">
-          <div
-            className="h-full bg-primary transition-all"
-            style={{ width: `${pct}%` }}
-          />
+        <div className="px-4 pb-3">
+          <div className="bg-muted h-1.5 w-full overflow-hidden rounded-full">
+            <div
+              className="bg-primary h-full rounded-full transition-all"
+              style={{ width: `${pct}%` }}
+            />
+          </div>
         </div>
       )}
 
       {run.error && (
-        <p className="border-b bg-destructive/10 px-4 py-2 text-xs text-destructive">
+        <p className="border-y bg-destructive/10 text-destructive px-4 py-2 text-xs">
           {run.error}
         </p>
       )}
 
-      <div className="min-h-0 flex-1">
-        <DeliveryLog hookId={hookId} runId={run.id} live={isActive} />
+      <div className="min-h-0 flex-1 border-t">
+        <DeliveryMonitor
+          hookId={hookId}
+          runId={run.id}
+          live={isActive}
+          totalRows={total}
+          batchSize={batchSize}
+          endpoint={endpoint}
+        />
       </div>
     </div>
   );

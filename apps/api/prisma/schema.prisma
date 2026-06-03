@@ -71,6 +71,7 @@ model HookRun {
   cursorOffset Int  @default(0) @map("cursor_offset") // next source offset on resume
   sentCount    Int  @default(0) @map("sent_count")
   failedCount  Int  @default(0) @map("failed_count")
+  skippedCount Int  @default(0) @map("skipped_count")
   totalCount   Int? @map("total_count") // best-effort; may be null
 
   // Resolved config captured at start (auth still encrypted) so editing/deleting
@@ -99,7 +100,9 @@ model HookDelivery {
   httpStatus      Int?     @map("http_status")
   attempts        Int      @default(0)
   error           String?
-  responseSnippet String?  @map("response_snippet") // truncated to ~2KB
+  rowKeysJson     String?  @map("row_keys_json")     // PK value(s) of the row(s) — enables retry-failed
+  requestBody     String?  @map("request_body")     // exact JSON body sent (capped)
+  responseBody    String?  @map("response_body")     // full response text (capped)
   durationMs      Int?     @map("duration_ms")
   createdAt       DateTime @default(now()) @map("created_at")
 

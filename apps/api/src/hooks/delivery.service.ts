@@ -11,7 +11,7 @@ import type { HookDeliveryConfig, HookDestination } from '@relay/core';
 import type { DeliveryOutcome } from './hooks.types';
 
 const RETRYABLE_STATUS = new Set([408, 425, 429, 500, 502, 503, 504]);
-const SNIPPET_LIMIT = 2048;
+const RESPONSE_LIMIT = 16_384;
 
 @Injectable()
 export class DeliveryService {
@@ -63,10 +63,11 @@ export class DeliveryService {
   ): Promise<DeliveryOutcome> {
     const headers = this.buildHeaders(dest, idempotencyKey);
     const payload = JSON.stringify(body ?? null);
+    const requestBody = payload.slice(0, RESPONSE_LIMIT);
     const started = performance.now();
     let lastError: string | null = null;
     let lastStatus: number | null = null;
-    let lastSnippet: string | null = null;
+    let lastResponse: string | null = null;
 
     for (let attempt = 1; attempt <= delivery.maxAttempts; attempt++) {
       if (runSignal.aborted) throw new DOMException('Run canceled', 'AbortError');
@@ -81,7 +82,7 @@ export class DeliveryService {
           signal,
         });
         lastStatus = res.status;
-        lastSnippet = (await res.text().catch(() => '')).slice(0, SNIPPET_LIMIT);
+        lastResponse = (await res.text().catch(() => '')).slice(0, RESPONSE_LIMIT);
 
         if (res.ok) {
           return {
@@ -89,7 +90,8 @@ export class DeliveryService {
             httpStatus: res.status,
             attempts: attempt,
             error: null,
-            responseSnippet: lastSnippet || null,
+            requestBody,
+            responseBody: lastResponse || null,
             durationMs: Math.round(performance.now() - started),
           };
         }
@@ -117,7 +119,8 @@ export class DeliveryService {
       httpStatus: lastStatus,
       attempts: delivery.maxAttempts,
       error: lastError ?? 'Delivery failed',
-      responseSnippet: lastSnippet,
+      requestBody,
+      responseBody: lastResponse,
       durationMs: Math.round(performance.now() - started),
     };
   }

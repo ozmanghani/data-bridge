@@ -12,6 +12,7 @@ import { InjectQueue } from '@nestjs/bullmq';
 import { Injectable, Logger, type OnModuleInit } from '@nestjs/common';
 import {
   AppError,
+  BadRequestError,
   ConflictError,
   type HookDelivery,
   type HookRun,
@@ -19,14 +20,27 @@ import {
   NotFoundError,
 } from '@relay/core';
 import { Queue } from 'bullmq';
-import type { HookDelivery as DeliveryRow, HookRun as RunRow } from '@prisma/client';
+import type {
+  HookDelivery as DeliveryRow,
+  HookRun as RunRow,
+} from '@prisma/client';
+import { AdapterPoolService } from '../connections/adapter-pool.service';
 import { PrismaService } from '../common/prisma.service';
 import { HookStoreService } from './hook-store.service';
 import { RunRegistryService } from './run-registry.service';
-import { HOOK_RUNS_QUEUE, type DeliveryOutcome, type HookRunJob } from './hooks.types';
+import {
+  HOOK_RUNS_QUEUE,
+  type DeliveryOutcome,
+  type HookRunJob,
+} from './hooks.types';
 
 const ACTIVE: HookRunStatus[] = ['queued', 'running', 'canceling'];
-const TERMINAL: HookRunStatus[] = ['completed', 'failed', 'canceled', 'interrupted'];
+const TERMINAL: HookRunStatus[] = [
+  'completed',
+  'failed',
+  'canceled',
+  'interrupted',
+];
 
 @Injectable()
 export class HookRunService implements OnModuleInit {
@@ -36,15 +50,75 @@ export class HookRunService implements OnModuleInit {
     private readonly prisma: PrismaService,
     private readonly store: HookStoreService,
     private readonly registry: RunRegistryService,
+    private readonly pool: AdapterPoolService,
     @InjectQueue(HOOK_RUNS_QUEUE) private readonly queue: Queue<HookRunJob>,
   ) {}
 
-  /* ----- start / resume ----- */
+  /* ----- prepare (queue without sending) ----- */
 
-  async start(hookId: string, resumeRunId?: string): Promise<HookRun> {
+  /**
+   * Create a "draft" run so the UI shows the planned deliveries as queued the
+   * moment a hook is created — before anything is sent. Replaces any prior
+   * draft for the hook. Best-effort total so the timeline can render cells.
+   */
+  async prepare(
+    hookId: string,
+    opts: { onlyExisting?: boolean } = {},
+  ): Promise<HookRun | null> {
+    await this.store.get(hookId);
+    // Don't clobber an in-flight run with a draft.
+    const active = await this.prisma.hookRun.findFirst({
+      where: { hookId, status: { in: ACTIVE } },
+    });
+    if (active) return null;
+
+    const { count } = await this.prisma.hookRun.deleteMany({
+      where: { hookId, status: 'draft' },
+    });
+    // On update we only refresh a draft that already existed — never add a
+    // fresh draft to a hook that has already been run.
+    if (opts.onlyExisting && count === 0) return null;
+
+    const snapshotJson = await this.store.snapshotJson(hookId);
+    const total = await this.computeTotal(snapshotJson).catch(() => null);
+    const row = await this.prisma.hookRun.create({
+      data: {
+        id: randomUUID(),
+        hookId,
+        status: 'draft',
+        configSnapshotJson: snapshotJson,
+        totalCount: total,
+      },
+    });
+    return this.toRun(row);
+  }
+
+  /* ----- start / resume / retry ----- */
+
+  async start(
+    hookId: string,
+    opts: { resumeRunId?: string; runId?: string; retryFailedOf?: string } = {},
+  ): Promise<HookRun> {
     await this.store.get(hookId); // 404 if the hook is gone
 
-    if (resumeRunId) return this.resume(hookId, resumeRunId);
+    if (opts.retryFailedOf) return this.retryFailed(hookId, opts.retryFailedOf);
+    if (opts.resumeRunId) return this.resume(hookId, opts.resumeRunId);
+
+    // Starting a prepared draft, or the hook's existing draft if any.
+    const draft = opts.runId
+      ? await this.getRunRow(opts.runId)
+      : await this.prisma.hookRun.findFirst({
+          where: { hookId, status: 'draft' },
+        });
+    if (draft && draft.hookId === hookId && draft.status === 'draft') {
+      await this.ensureQueueReady();
+      const row = await this.prisma.hookRun.update({
+        where: { id: draft.id },
+        data: { status: 'queued', startedAt: new Date() },
+      });
+      await this.enqueue(draft.id, hookId);
+      return this.toRun(row);
+    }
 
     const active = await this.prisma.hookRun.findFirst({
       where: { hookId, status: { in: ACTIVE } },
@@ -57,24 +131,107 @@ export class HookRunService implements OnModuleInit {
 
     await this.ensureQueueReady();
     const id = randomUUID();
-    const snapshot = await this.store.snapshotJson(hookId);
+    const snapshotJson = await this.store.snapshotJson(hookId);
+    const total = await this.computeTotal(snapshotJson).catch(() => null);
     const row = await this.prisma.hookRun.create({
-      data: { id, hookId, status: 'queued', configSnapshotJson: snapshot },
+      data: {
+        id,
+        hookId,
+        status: 'queued',
+        configSnapshotJson: snapshotJson,
+        totalCount: total,
+      },
     });
     await this.enqueue(id, hookId);
     return this.toRun(row);
   }
 
+  /**
+   * Re-send the rows that FAILED in this run, IN PLACE — the same run and the
+   * same delivery cells are reused, so failed (red) rows flip to delivered
+   * (green) on success. The config snapshot is refreshed to the hook's current
+   * config so a fixed URL/headers/auth take effect. Resetting the cursor makes
+   * the worker re-stream and re-send only the not-yet-settled (failed) rows;
+   * already-delivered/skipped rows are skipped untouched.
+   */
+  private async retryFailed(hookId: string, runId: string): Promise<HookRun> {
+    const run = await this.getRunRow(runId);
+    if (run.hookId !== hookId)
+      throw new NotFoundError(`Run "${runId}" not found`);
+    if (!TERMINAL.includes(run.status as HookRunStatus)) {
+      throw new ConflictError('Wait for the run to finish before retrying.');
+    }
+    const failedCount = await this.prisma.hookDelivery.count({
+      where: { runId, status: 'failed' },
+    });
+    if (failedCount === 0)
+      throw new BadRequestError('No failed rows to retry.');
+
+    await this.ensureQueueReady();
+    const updated = await this.prisma.hookRun.update({
+      where: { id: runId },
+      data: {
+        status: 'queued',
+        cursorOffset: 0,
+        error: null,
+        finishedAt: null,
+        configSnapshotJson: await this.store.snapshotJson(hookId),
+      },
+    });
+    await this.enqueue(runId, hookId);
+    return this.toRun(updated);
+  }
+
+  /** Best-effort planned row count for a source, used to render the timeline. */
+  private async computeTotal(snapshotJson: string): Promise<number | null> {
+    const hook = this.store.resolveSnapshot(snapshotJson);
+    if (hook.source.kind === 'table') {
+      const src = hook.source;
+      const page = await this.pool.withAdapter(
+        src.connectionId,
+        src.database,
+        (a) =>
+          a.browse({
+            schema: src.schema,
+            table: src.table,
+            filters: src.filters,
+            limit: 1,
+            offset: 0,
+          }),
+      );
+      return page.total;
+    }
+    const result = await this.pool.withAdapter(
+      hook.source.connectionId,
+      hook.source.database,
+      (a) => a.query(hook.source.kind === 'query' ? hook.source.statement : ''),
+    );
+    return result.rows.length;
+  }
+
   private async resume(hookId: string, runId: string): Promise<HookRun> {
     const row = await this.getRunRow(runId);
-    if (row.hookId !== hookId) throw new NotFoundError(`Run "${runId}" not found`);
-    if (!TERMINAL.includes(row.status as HookRunStatus) || row.status === 'completed') {
-      throw new ConflictError(`Run "${runId}" cannot be resumed (status: ${row.status}).`);
+    if (row.hookId !== hookId)
+      throw new NotFoundError(`Run "${runId}" not found`);
+    if (
+      !TERMINAL.includes(row.status as HookRunStatus) ||
+      row.status === 'completed'
+    ) {
+      throw new ConflictError(
+        `Run "${runId}" cannot be resumed (status: ${row.status}).`,
+      );
     }
     await this.ensureQueueReady();
+    // Resume the REMAINING rows with the hook's CURRENT config, so edits made
+    // after the run started (e.g. fewer columns, a new endpoint) take effect.
     const reset = await this.prisma.hookRun.update({
       where: { id: runId },
-      data: { status: 'queued', error: null, finishedAt: null },
+      data: {
+        status: 'queued',
+        error: null,
+        finishedAt: null,
+        configSnapshotJson: await this.store.snapshotJson(hookId),
+      },
     });
     await this.enqueue(runId, hookId);
     return this.toRun(reset);
@@ -111,7 +268,8 @@ export class HookRunService implements OnModuleInit {
 
   async cancel(hookId: string, runId: string): Promise<HookRun> {
     const row = await this.getRunRow(runId);
-    if (row.hookId !== hookId) throw new NotFoundError(`Run "${runId}" not found`);
+    if (row.hookId !== hookId)
+      throw new NotFoundError(`Run "${runId}" not found`);
     if (TERMINAL.includes(row.status as HookRunStatus)) return this.toRun(row);
 
     const updated = await this.prisma.hookRun.update({
@@ -136,21 +294,96 @@ export class HookRunService implements OnModuleInit {
 
   async getRun(hookId: string, runId: string): Promise<HookRun> {
     const row = await this.getRunRow(runId);
-    if (row.hookId !== hookId) throw new NotFoundError(`Run "${runId}" not found`);
+    if (row.hookId !== hookId)
+      throw new NotFoundError(`Run "${runId}" not found`);
     return this.toRun(row);
   }
 
   async listDeliveries(
     runId: string,
-    opts: { status?: 'success' | 'failed'; offset?: number; limit?: number } = {},
+    opts: {
+      status?: 'success' | 'failed' | 'skipped';
+      /** Inclusive sequence window — lets the UI page the timeline cheaply. */
+      from?: number;
+      to?: number;
+      offset?: number;
+      limit?: number;
+    } = {},
   ): Promise<HookDelivery[]> {
+    const sequence =
+      opts.from != null || opts.to != null
+        ? {
+            ...(opts.from != null ? { gte: opts.from } : {}),
+            ...(opts.to != null ? { lte: opts.to } : {}),
+          }
+        : undefined;
     const rows = await this.prisma.hookDelivery.findMany({
-      where: { runId, ...(opts.status ? { status: opts.status } : {}) },
+      where: {
+        runId,
+        ...(opts.status ? { status: opts.status } : {}),
+        ...(sequence ? { sequence } : {}),
+      },
       orderBy: { sequence: 'asc' },
       skip: opts.offset ?? 0,
-      take: Math.min(opts.limit ?? 100, 500),
+      take: Math.min(opts.limit ?? 500, 2000),
     });
     return rows.map((r) => this.toDelivery(r));
+  }
+
+  /**
+   * Mark sequences to skip. Best-effort: only effective while the sequence is
+   * still queued (the worker checks the skip set before sending). Creates a
+   * `skipped` delivery row for each sequence that has no delivery yet.
+   */
+  async skipDeliveries(runId: string, sequences: number[]): Promise<number> {
+    const run = await this.getRunRow(runId);
+    const batchSize = this.snapshotBatchSize(run.configSnapshotJson);
+    const existing = await this.prisma.hookDelivery.findMany({
+      where: { runId, sequence: { in: sequences } },
+      select: { sequence: true },
+    });
+    const taken = new Set(existing.map((e) => e.sequence));
+    const fresh = [...new Set(sequences)].filter((s) => !taken.has(s));
+    if (fresh.length === 0) return 0;
+
+    await this.prisma.$transaction([
+      this.prisma.hookDelivery.createMany({
+        data: fresh.map((sequence) => ({
+          id: randomUUID(),
+          runId,
+          sequence,
+          rowIndex: sequence * batchSize,
+          rowCount: batchSize,
+          status: 'skipped',
+          attempts: 0,
+        })),
+      }),
+      this.prisma.hookRun.update({
+        where: { id: runId },
+        data: { skippedCount: { increment: fresh.length * batchSize } },
+      }),
+    ]);
+    return fresh.length;
+  }
+
+  /** Sequences explicitly skipped — the worker must not send these. */
+  async skippedSequences(runId: string): Promise<Set<number>> {
+    const rows = await this.prisma.hookDelivery.findMany({
+      where: { runId, status: 'skipped' },
+      select: { sequence: true },
+    });
+    return new Set(rows.map((r) => r.sequence));
+  }
+
+  private snapshotBatchSize(snapshotJson: string): number {
+    try {
+      const snap = JSON.parse(snapshotJson) as {
+        delivery?: { batchSize?: number };
+      };
+      return Math.max(1, snap.delivery?.batchSize ?? 1);
+    } catch {
+      return 1;
+    }
   }
 
   /* ----- processor-facing mutations ----- */
@@ -182,17 +415,26 @@ export class HookRunService implements OnModuleInit {
   }
 
   async setTotal(runId: string, totalCount: number | null): Promise<void> {
-    await this.prisma.hookRun.update({ where: { id: runId }, data: { totalCount } });
+    await this.prisma.hookRun.update({
+      where: { id: runId },
+      data: { totalCount },
+    });
   }
 
   async setCursor(runId: string, cursorOffset: number): Promise<void> {
-    await this.prisma.hookRun.update({ where: { id: runId }, data: { cursorOffset } });
+    await this.prisma.hookRun.update({
+      where: { id: runId },
+      data: { cursorOffset },
+    });
   }
 
-  /** Sequences already delivered successfully — skipped on resume. */
-  async succeededSequences(runId: string): Promise<Set<number>> {
+  /**
+   * Sequences the worker must not (re)send: already delivered, or skipped.
+   * Used to make resume idempotent and to honor skips queued before the run.
+   */
+  async settledSequences(runId: string): Promise<Set<number>> {
     const rows = await this.prisma.hookDelivery.findMany({
-      where: { runId, status: 'success' },
+      where: { runId, status: { in: ['success', 'skipped'] } },
       select: { sequence: true },
     });
     return new Set(rows.map((r) => r.sequence));
@@ -201,9 +443,39 @@ export class HookRunService implements OnModuleInit {
   /** Persist one delivery and advance the run's counters atomically. */
   async recordDelivery(
     runId: string,
-    meta: { sequence: number; rowIndex: number; rowCount: number },
+    meta: {
+      sequence: number;
+      rowIndex: number;
+      rowCount: number;
+      rowKeys: unknown[] | null;
+    },
     outcome: DeliveryOutcome,
   ): Promise<void> {
+    const rowKeysJson = meta.rowKeys ? JSON.stringify(meta.rowKeys) : null;
+
+    // A retry re-records an existing (failed) delivery, so adjust counters by
+    // the delta: remove the old status' contribution, add the new one. This is
+    // what flips a red cell green and keeps the stat cards correct.
+    const existing = await this.prisma.hookDelivery.findUnique({
+      where: { runId_sequence: { runId, sequence: meta.sequence } },
+      select: { status: true, rowCount: true },
+    });
+    let sent = 0;
+    let failed = 0;
+    let skipped = 0;
+    if (existing) {
+      if (existing.status === 'success') sent -= existing.rowCount;
+      else if (existing.status === 'failed') failed -= existing.rowCount;
+      else if (existing.status === 'skipped') skipped -= existing.rowCount;
+    }
+    if (outcome.status === 'success') sent += meta.rowCount;
+    else failed += meta.rowCount;
+
+    const counters: Record<string, { increment: number }> = {};
+    if (sent !== 0) counters.sentCount = { increment: sent };
+    if (failed !== 0) counters.failedCount = { increment: failed };
+    if (skipped !== 0) counters.skippedCount = { increment: skipped };
+
     await this.prisma.$transaction([
       this.prisma.hookDelivery.upsert({
         where: { runId_sequence: { runId, sequence: meta.sequence } },
@@ -217,25 +489,23 @@ export class HookRunService implements OnModuleInit {
           httpStatus: outcome.httpStatus,
           attempts: outcome.attempts,
           error: outcome.error,
-          responseSnippet: outcome.responseSnippet,
+          rowKeysJson,
+          requestBody: outcome.requestBody,
+          responseBody: outcome.responseBody,
           durationMs: outcome.durationMs,
         },
         update: {
+          rowKeysJson,
           status: outcome.status,
           httpStatus: outcome.httpStatus,
           attempts: outcome.attempts,
           error: outcome.error,
-          responseSnippet: outcome.responseSnippet,
+          requestBody: outcome.requestBody,
+          responseBody: outcome.responseBody,
           durationMs: outcome.durationMs,
         },
       }),
-      this.prisma.hookRun.update({
-        where: { id: runId },
-        data:
-          outcome.status === 'success'
-            ? { sentCount: { increment: meta.rowCount } }
-            : { failedCount: { increment: meta.rowCount } },
-      }),
+      this.prisma.hookRun.update({ where: { id: runId }, data: counters }),
     ]);
   }
 
@@ -266,10 +536,13 @@ export class HookRunService implements OnModuleInit {
     for (const r of rows) {
       // Deterministic jobId means this is a no-op if the job already exists.
       await this.enqueue(r.id, r.hookId).catch((err) =>
-        this.logger.warn(`Could not re-enqueue run ${r.id}: ${(err as Error).message}`),
+        this.logger.warn(
+          `Could not re-enqueue run ${r.id}: ${(err as Error).message}`,
+        ),
       );
     }
-    if (rows.length) this.logger.log(`Recovered ${rows.length} interrupted hook run(s)`);
+    if (rows.length)
+      this.logger.log(`Recovered ${rows.length} interrupted hook run(s)`);
   }
 
   /* ----- mappers ----- */
@@ -282,6 +555,7 @@ export class HookRunService implements OnModuleInit {
       cursorOffset: row.cursorOffset,
       sentCount: row.sentCount,
       failedCount: row.failedCount,
+      skippedCount: row.skippedCount,
       totalCount: row.totalCount,
       error: row.error,
       startedAt: row.startedAt.toISOString(),
@@ -300,7 +574,8 @@ export class HookRunService implements OnModuleInit {
       httpStatus: row.httpStatus,
       attempts: row.attempts,
       error: row.error,
-      responseSnippet: row.responseSnippet,
+      requestBody: row.requestBody,
+      responseBody: row.responseBody,
       durationMs: row.durationMs,
       createdAt: row.createdAt.toISOString(),
     };
