@@ -1,7 +1,7 @@
 'use client';
 
 import { useEffect, useState } from 'react';
-import { Pencil, Play, Trash2, Webhook, Loader2 } from 'lucide-react';
+import { Pencil, Play, Radio, Square, Trash2, Webhook, Loader2 } from 'lucide-react';
 import { toast } from 'sonner';
 import { ApiError } from '@/lib/api';
 import {
@@ -9,6 +9,8 @@ import {
   useHookRuns,
   useHooks,
   useStartHookRun,
+  useStartWatch,
+  useStopWatch,
 } from '@/lib/queries';
 import { useStudio } from '@/lib/store';
 import { cn } from '@/lib/utils';
@@ -42,15 +44,23 @@ export function AutomationsView() {
     );
   }
 
+  const destHostname = (() => {
+    try {
+      return new URL(hook.destination.url).hostname;
+    } catch {
+      return hook.destination.url;
+    }
+  })();
+
   return (
     <HookPanel
       key={hook.id}
       hookId={hook.id}
       hookName={hook.name}
       sourceLabel={hook.source.kind === 'table' ? hook.source.table : 'custom query'}
-      destLabel={`${hook.destination.method} ${hook.destination.url}`}
-      batchSize={hook.delivery.batchSize}
+      destLabel={`${hook.destination.method} ${destHostname}`}
       endpoint={{ url: hook.destination.url, method: hook.destination.method }}
+      isWatch={hook.trigger.kind !== 'replay'}
       onDeleted={() => selectHook(null)}
     />
   );
@@ -61,24 +71,29 @@ function HookPanel({
   hookName,
   sourceLabel,
   destLabel,
-  batchSize,
   endpoint,
+  isWatch,
   onDeleted,
 }: {
   hookId: string;
   hookName: string;
   sourceLabel: string;
   destLabel: string;
-  batchSize: number;
   endpoint: { url: string; method: string };
+  isWatch: boolean;
   onDeleted: () => void;
 }) {
   const confirm = useConfirm();
   const { openHookEditor } = useStudio();
   const start = useStartHookRun(hookId);
+  const startWatch = useStartWatch(hookId);
+  const stopWatch = useStopWatch(hookId);
   const del = useDeleteHook();
   const { data: runs } = useHookRuns(hookId);
   const [selectedRunId, setSelectedRunId] = useState<string | null>(null);
+  const listening = !!runs?.some((r) =>
+    ['queued', 'running', 'canceling'].includes(r.status),
+  );
 
   // Default to (and follow) the most recent run.
   useEffect(() => {
@@ -100,6 +115,29 @@ function HookPanel({
       toast.success('Run started');
     } catch (err) {
       toast.error('Could not start run', {
+        description: err instanceof ApiError ? err.message : String(err),
+      });
+    }
+  }
+
+  async function handleStartWatch() {
+    try {
+      const run = await startWatch.mutateAsync();
+      setSelectedRunId(run.id);
+      toast.success('Listening for new data');
+    } catch (err) {
+      toast.error('Could not start listening', {
+        description: err instanceof ApiError ? err.message : String(err),
+      });
+    }
+  }
+
+  async function handleStopWatch() {
+    try {
+      await stopWatch.mutateAsync();
+      toast.success('Stopped listening');
+    } catch (err) {
+      toast.error('Could not stop', {
         description: err instanceof ApiError ? err.message : String(err),
       });
     }
@@ -135,14 +173,41 @@ function HookPanel({
           </p>
         </div>
         <div className="ml-auto flex shrink-0 items-center gap-2">
-          <Button size="sm" onClick={handleRun} disabled={start.isPending}>
-            {start.isPending ? (
-              <Loader2 className="mr-1.5 h-3.5 w-3.5 animate-spin" />
+          {isWatch ? (
+            listening ? (
+              <Button
+                size="sm"
+                variant="outline"
+                onClick={handleStopWatch}
+                disabled={stopWatch.isPending}
+              >
+                {stopWatch.isPending ? (
+                  <Loader2 className="mr-1.5 h-3.5 w-3.5 animate-spin" />
+                ) : (
+                  <Square className="mr-1.5 h-3.5 w-3.5" />
+                )}
+                Stop listening
+              </Button>
             ) : (
-              <Play className="mr-1.5 h-3.5 w-3.5" />
-            )}
-            Run
-          </Button>
+              <Button size="sm" onClick={handleStartWatch} disabled={startWatch.isPending}>
+                {startWatch.isPending ? (
+                  <Loader2 className="mr-1.5 h-3.5 w-3.5 animate-spin" />
+                ) : (
+                  <Radio className="mr-1.5 h-3.5 w-3.5" />
+                )}
+                Start listening
+              </Button>
+            )
+          ) : (
+            <Button size="sm" onClick={handleRun} disabled={start.isPending}>
+              {start.isPending ? (
+                <Loader2 className="mr-1.5 h-3.5 w-3.5 animate-spin" />
+              ) : (
+                <Play className="mr-1.5 h-3.5 w-3.5" />
+              )}
+              Run
+            </Button>
+          )}
           <Button
             size="sm"
             variant="outline"
@@ -161,7 +226,9 @@ function HookPanel({
       <div className="flex items-center gap-2 overflow-x-auto border-b px-4 py-2">
         {(!runs || runs.length === 0) && (
           <p className="text-xs text-muted-foreground">
-            No runs yet — press Run to stream rows to the endpoint.
+            {isWatch
+              ? 'Not listening yet — press Start listening to stream changes as they happen.'
+              : 'No runs yet — press Run to stream rows to the endpoint.'}
           </p>
         )}
         {runs?.map((run) => (
@@ -189,8 +256,8 @@ function HookPanel({
           <RunDetail
             hookId={hookId}
             run={selectedRun}
-            batchSize={batchSize}
             endpoint={endpoint}
+            isHook={isWatch}
           />
         ) : (
           <div className="flex h-full items-center justify-center text-sm text-muted-foreground">

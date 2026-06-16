@@ -5,6 +5,9 @@ import type { RelationKind } from '@relay/core';
 
 export type StudioTab = 'data' | 'query' | 'structure' | 'diagram';
 
+/** Sidebar grouping: live "Hooks" (watch trigger) vs on-demand "Jobs" (replay). */
+export type AutomationTab = 'hooks' | 'jobs';
+
 export interface SelectedRelation {
   schema?: string;
   table: string;
@@ -42,7 +45,8 @@ interface StudioState {
   /** Connection editor dialog state. */
   dialog: { open: boolean; editingId: string | null };
 
-  /** Hooks surface: the currently selected hook. */
+  /** Hooks surface: which sidebar group is active + the selected hook. */
+  automationTab: AutomationTab;
   selectedHookId: string | null;
   /** Hook editor dialog: open + which hook (null = new) + optional prefill. */
   hookEditor: {
@@ -62,6 +66,7 @@ interface StudioState {
   selectRelation: (rel: SelectedRelation) => void;
   setTab: (tab: StudioTab) => void;
 
+  setAutomationTab: (tab: AutomationTab) => void;
   selectHook: (id: string | null) => void;
   openHookEditor: (opts?: {
     editingId?: string | null;
@@ -90,6 +95,7 @@ export const useStudio = create<StudioState>((set) => ({
   selected: null,
   tab: 'data',
   dialog: { open: false, editingId: null },
+  automationTab: 'hooks',
   selectedHookId: null,
   hookEditor: { open: false, editingId: null, seed: null },
   dataSourcesOpen: false,
@@ -98,6 +104,7 @@ export const useStudio = create<StudioState>((set) => ({
 
   // Selecting a hook and browsing a table are mutually exclusive — the main
   // view shows the table preview when one is picked, else the hooks workspace.
+  setAutomationTab: (tab) => set({ automationTab: tab }),
   selectHook: (id) => set({ selectedHookId: id, selected: null }),
   openHookEditor: (opts) =>
     set({

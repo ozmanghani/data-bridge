@@ -51,6 +51,7 @@ model Hook {
   authEnc         String?  @map("auth_enc")          // encrypted secret material only
   transformJson   String   @map("transform_json")
   deliveryJson    String   @map("delivery_json")
+  triggerJson     String?  @map("trigger_json") // null = { kind: 'replay' }
   enabled         Boolean  @default(true)
   createdAt       DateTime @default(now()) @map("created_at")
   updatedAt       DateTime @updatedAt @map("updated_at")
@@ -77,6 +78,7 @@ model HookRun {
   // Resolved config captured at start (auth still encrypted) so editing/deleting
   // the Hook mid-run cannot corrupt or leak the in-flight run.
   configSnapshotJson String  @map("config_snapshot_json")
+  cursorJson         String? @map("cursor_json") // watch-run change-detection cursor
   error              String?
 
   startedAt  DateTime  @default(now()) @map("started_at")

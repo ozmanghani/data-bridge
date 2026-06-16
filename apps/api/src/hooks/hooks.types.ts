@@ -8,6 +8,7 @@ import type {
   HookDestination,
   HookSource,
   HookTransformConfig,
+  HookTrigger,
 } from '@relay/core';
 
 /** A hook with its auth secret decrypted — server-internal use only. */
@@ -18,6 +19,7 @@ export interface ResolvedHook {
   destination: HookDestination; // auth carries the real secret here
   transform: HookTransformConfig;
   delivery: HookDeliveryConfig;
+  trigger: HookTrigger;
   enabled: boolean;
 }
 
@@ -38,4 +40,10 @@ export interface HookRunJob {
   hookId: string;
 }
 
+/** The BullMQ job payload for a `hook-watch` poll cycle. */
+export interface HookWatchJob {
+  hookId: string;
+}
+
 export const HOOK_RUNS_QUEUE = 'hook-runs';
+export const HOOK_WATCH_QUEUE = 'hook-watch';

@@ -15,7 +15,13 @@
  */
 import { Processor, WorkerHost } from '@nestjs/bullmq';
 import { Logger } from '@nestjs/common';
-import { BadRequestError, renderBatch, renderRow, type SortSpec } from '@relay/core';
+import {
+  BadRequestError,
+  renderBatch,
+  renderRow,
+  type BrowseParams,
+  type SortSpec,
+} from '@relay/core';
 import type { Job } from 'bullmq';
 import { AdapterPoolService } from '../connections/adapter-pool.service';
 import { runtimeConfig } from '../common/runtime-config';
@@ -212,21 +218,64 @@ export class HookRunProcessor extends WorkerHost {
   ): AsyncGenerator<StreamItem> {
     if (hook.source.kind !== 'table') return;
     const src = hook.source;
-    const { sort, total } = await this.resolveTableOrder(hook);
+    const { sort, total, keysetColumn } = await this.resolveTableOrder(hook);
     await this.runs.setTotal(runId, total);
+    const pageSize = hook.delivery.pageSize;
+    const browse = (params: BrowseParams) =>
+      this.pool.withAdapter(src.connectionId, src.database, (a) => a.browse(params));
 
-    let offset = startOffset;
-    for (;;) {
-      const page = await this.pool.withAdapter(src.connectionId, src.database, (a) =>
-        a.browse({
+    // Keyset pagination on a unique key — O(1) per page regardless of how deep
+    // we are, so a multi-million-row replay stays fast (no OFFSET re-scan).
+    if (keysetColumn) {
+      let lastKey: unknown = null;
+      let index = startOffset;
+      if (startOffset > 0) {
+        // Resume: find the key of the last already-delivered row (one seek).
+        const seek = await browse({
           schema: src.schema,
           table: src.table,
           filters: src.filters,
           sort,
-          limit: hook.delivery.pageSize,
-          offset,
-        }),
-      );
+          limit: 1,
+          offset: startOffset - 1,
+        });
+        lastKey = seek.rows[0]?.[keysetColumn] ?? null;
+      }
+      for (;;) {
+        const filters = [
+          ...(src.filters ?? []),
+          ...(lastKey != null
+            ? [{ column: keysetColumn, operator: 'gt' as const, value: lastKey }]
+            : []),
+        ];
+        const page = await browse({
+          schema: src.schema,
+          table: src.table,
+          filters,
+          sort,
+          limit: pageSize,
+          offset: 0,
+        });
+        for (const row of page.rows) {
+          yield { row, index };
+          index++;
+          lastKey = row[keysetColumn];
+        }
+        if (!page.hasMore || page.rows.length === 0) return;
+      }
+    }
+
+    // Fallback: OFFSET pagination (composite key or custom non-unique sort).
+    let offset = startOffset;
+    for (;;) {
+      const page = await browse({
+        schema: src.schema,
+        table: src.table,
+        filters: src.filters,
+        sort,
+        limit: pageSize,
+        offset,
+      });
       for (let i = 0; i < page.rows.length; i++) {
         yield { row: page.rows[i]!, index: offset + i };
       }
@@ -237,21 +286,33 @@ export class HookRunProcessor extends WorkerHost {
 
   /**
    * A stable order is mandatory: `LIMIT/OFFSET` without `ORDER BY` can skip or
-   * repeat rows across pages. Use the caller's sort, else the primary key.
+   * repeat rows across pages. Use the caller's sort, else the primary key, and
+   * report whether we can keyset-paginate (single, uniquely-ordered key).
    */
   private async resolveTableOrder(
     hook: ResolvedHook,
-  ): Promise<{ sort: SortSpec[]; total: number | null }> {
-    if (hook.source.kind !== 'table') return { sort: [], total: null };
+  ): Promise<{ sort: SortSpec[]; total: number | null; keysetColumn: string | null }> {
+    if (hook.source.kind !== 'table') return { sort: [], total: null, keysetColumn: null };
     const src = hook.source;
     const probe = await this.pool.withAdapter(src.connectionId, src.database, (a) =>
       a.browse({ schema: src.schema, table: src.table, filters: src.filters, limit: 1, offset: 0 }),
     );
-    if (src.sort && src.sort.length > 0) return { sort: src.sort, total: probe.total };
+    const singlePk = probe.primaryKey.length === 1 ? probe.primaryKey[0]! : null;
+
+    if (src.sort && src.sort.length > 0) {
+      // Keyset only if the caller's order is exactly the (unique) primary key asc.
+      const s = src.sort;
+      const keyset =
+        s.length === 1 && s[0]!.column === singlePk && s[0]!.direction === 'asc'
+          ? singlePk
+          : null;
+      return { sort: src.sort, total: probe.total, keysetColumn: keyset };
+    }
     if (probe.primaryKey.length > 0) {
       return {
         sort: probe.primaryKey.map((column) => ({ column, direction: 'asc' as const })),
         total: probe.total,
+        keysetColumn: singlePk,
       };
     }
     throw new BadRequestError(

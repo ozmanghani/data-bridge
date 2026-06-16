@@ -10,6 +10,8 @@ import type {
   CreateTableSpec,
   DatabaseSchema,
   DeleteRowParams,
+  CdcReadiness,
+  CdcReadinessDTO,
   DriverInfo,
   Hook,
   HookDelivery,
@@ -244,6 +246,14 @@ export const api = {
       method: 'POST',
       ...jsonBody({ sequences }),
     }),
+  startWatch: (id: string) =>
+    request<HookRun>(`/hooks/${id}/watch/start`, { method: 'POST' }),
+  stopWatch: (id: string) =>
+    request<HookRun | null>(`/hooks/${id}/watch/stop`, { method: 'POST' }),
+  cdcReadiness: (body: CdcReadinessDTO) =>
+    request<CdcReadiness>('/hooks/cdc/readiness', { method: 'POST', ...jsonBody(body) }),
+  retryFailedDeliveries: (id: string, runId: string) =>
+    request<HookRun>(`/hooks/${id}/runs/${runId}/retry-failed`, { method: 'POST' }),
 };
 
 function dbQuery(database?: string): string {

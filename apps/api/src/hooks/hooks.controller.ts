@@ -17,6 +17,9 @@ import {
   type HookRun,
   type StartRunDTO,
   type SkipDTO,
+  type CdcReadiness,
+  type CdcReadinessDTO,
+  cdcReadinessSchema,
   hookInputSchema,
   hookPreviewSchema,
   renderRow,
@@ -26,14 +29,18 @@ import {
 import { AdapterPoolService } from '../connections/adapter-pool.service';
 import { ZodValidationPipe } from '../common/zod-validation.pipe';
 import { DeliveryService } from './delivery.service';
+import { HookCdcService } from './hook-cdc.service';
 import { HookRunService } from './hook-run.service';
 import { HookStoreService } from './hook-store.service';
+import { HookWatchService } from './hook-watch.service';
 
 @Controller('hooks')
 export class HooksController {
   constructor(
     private readonly store: HookStoreService,
     private readonly runs: HookRunService,
+    private readonly watch: HookWatchService,
+    private readonly cdc: HookCdcService,
     private readonly pool: AdapterPoolService,
     private readonly delivery: DeliveryService,
   ) {}
@@ -73,6 +80,10 @@ export class HooksController {
 
   @Delete(':id')
   async remove(@Param('id') id: string): Promise<{ id: string }> {
+    // Tear down any live listener BEFORE deleting (CDC drops its slot/publication).
+    const hook = await this.store.get(id).catch(() => null);
+    if (hook?.trigger.kind === 'cdc') await this.cdc.cleanup(id).catch(() => undefined);
+    else if (hook?.trigger.kind === 'watch') await this.watch.stop(id).catch(() => undefined);
     await this.store.remove(id);
     return { id };
   }
@@ -153,6 +164,27 @@ export class HooksController {
     return this.runs.start(id, dto);
   }
 
+  /* ----- live listening (polling watch OR event-based CDC) ----- */
+
+  @Post('cdc/readiness')
+  cdcReadiness(
+    @Body(new ZodValidationPipe(cdcReadinessSchema)) dto: CdcReadinessDTO,
+  ): Promise<CdcReadiness> {
+    return this.cdc.readiness(dto);
+  }
+
+  @Post(':id/watch/start')
+  async startWatch(@Param('id') id: string): Promise<HookRun> {
+    const hook = await this.store.get(id);
+    return hook.trigger.kind === 'cdc' ? this.cdc.start(id) : this.watch.start(id);
+  }
+
+  @Post(':id/watch/stop')
+  async stopWatch(@Param('id') id: string): Promise<HookRun | null> {
+    const hook = await this.store.get(id);
+    return hook.trigger.kind === 'cdc' ? this.cdc.stop(id) : this.watch.stop(id);
+  }
+
   @Get(':id/runs')
   listRuns(@Param('id') id: string): Promise<HookRun[]> {
     return this.runs.listRuns(id);
@@ -164,6 +196,14 @@ export class HooksController {
     @Param('runId') runId: string,
   ): Promise<HookRun> {
     return this.runs.getRun(id, runId);
+  }
+
+  @Post(':id/runs/:runId/retry-failed')
+  retryFailed(
+    @Param('id') id: string,
+    @Param('runId') runId: string,
+  ): Promise<HookRun> {
+    return this.runs.resendFailed(id, runId);
   }
 
   @Post(':id/runs/:runId/cancel')

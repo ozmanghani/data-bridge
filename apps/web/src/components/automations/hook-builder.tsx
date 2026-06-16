@@ -6,6 +6,7 @@ import {
   Loader2,
   Pencil,
   Plus,
+  Radio,
   RefreshCw,
   Webhook,
   X,
@@ -106,7 +107,7 @@ function formatCell(value: unknown): string {
 }
 
 export function HookBuilder() {
-  const { hookEditor, closeHookEditor, selectHook, openConnectionDialog } =
+  const { hookEditor, closeHookEditor, selectHook, openConnectionDialog, automationTab } =
     useStudio();
   const editing = hookEditor.editingId;
   const create = useCreateHook();
@@ -126,6 +127,24 @@ export function HookBuilder() {
   /** Column preference: null = all columns, array = a pinned subset (editing). */
   const [fieldsPref, setFieldsPref] = useState<string[] | null>(null);
   const [offset, setOffset] = useState(0);
+
+  // ----- trigger -----
+  // The builder is locked to one of two environments, decided by the sidebar tab
+  // (new) or the hook's existing trigger (editing). 'job' = replay-only;
+  // 'hook' = listen-only (polling/CDC). They never share trigger UI.
+  const [builderKind, setBuilderKind] = useState<'job' | 'hook'>('job');
+  const [triggerKind, setTriggerKind] = useState<'replay' | 'watch' | 'cdc'>('replay');
+  const [watchStrategy, setWatchStrategy] = useState<
+    'increment' | 'timestamp' | 'snapshot'
+  >('increment');
+  const [watchColumn, setWatchColumn] = useState('');
+  const [pollSeconds, setPollSeconds] = useState(5);
+  const [watchStartFrom, setWatchStartFrom] = useState<'now' | 'beginning'>('now');
+  const [cdcOps, setCdcOps] = useState<Set<'insert' | 'update' | 'delete'>>(
+    new Set(['insert', 'update', 'delete']),
+  );
+  const [readiness, setReadiness] = useState<import('@relay/core').CdcReadiness | null>(null);
+  const [checkingCdc, setCheckingCdc] = useState(false);
 
   // ----- payload / destination / delivery -----
   const [wrapKey, setWrapKey] = useState('');
@@ -156,9 +175,9 @@ export function HookBuilder() {
     refetch,
   } = useBrowse(connectionId || null, browseParams, database || undefined);
 
-  const columns = browse?.columns ?? [];
-  const rows = browse?.rows ?? [];
-  const pk = browse?.primaryKey ?? [];
+  const columns = useMemo(() => browse?.columns ?? [], [browse]);
+  const rows = useMemo(() => browse?.rows ?? [], [browse]);
+  const pk = useMemo(() => browse?.primaryKey ?? [], [browse]);
   const singlePk = pk.length === 1 ? pk[0]! : null;
 
   /* Populate from an existing hook or a seed when opened. */
@@ -173,6 +192,10 @@ export function HookBuilder() {
       return;
     }
     reset();
+    // New items belong to the active sidebar tab's environment.
+    const kind = automationTab === 'hooks' ? 'hook' : 'job';
+    setBuilderKind(kind);
+    setTriggerKind(kind === 'hook' ? 'watch' : 'replay');
     if (hookEditor.seed) {
       setConnectionId(hookEditor.seed.connectionId);
       setDatabase(hookEditor.seed.database ?? '');
@@ -216,6 +239,13 @@ export function HookBuilder() {
     setIncluded(new Set());
     setFieldsPref(null);
     setOffset(0);
+    setTriggerKind('replay');
+    setWatchStrategy('increment');
+    setWatchColumn('');
+    setPollSeconds(5);
+    setWatchStartFrom('now');
+    setCdcOps(new Set(['insert', 'update', 'delete']));
+    setReadiness(null);
     setWrapKey('');
     setDest(blankDestination());
     setDelivery(blankDelivery());
@@ -241,6 +271,23 @@ export function HookBuilder() {
     // Applied when the table's columns load (subset = pinned fields; none = all).
     setFieldsPref(h.transform.fields ?? null);
     setWrapKey(h.transform.wrapKey ?? '');
+    if (h.trigger.kind === 'watch') {
+      setBuilderKind('hook');
+      setTriggerKind('watch');
+      setWatchStrategy(h.trigger.strategy.strategy);
+      setWatchColumn(
+        h.trigger.strategy.strategy === 'snapshot' ? '' : h.trigger.strategy.column,
+      );
+      setPollSeconds(Math.round(h.trigger.pollIntervalMs / 1000));
+      setWatchStartFrom(h.trigger.startFrom);
+    } else if (h.trigger.kind === 'cdc') {
+      setBuilderKind('hook');
+      setTriggerKind('cdc');
+      setCdcOps(new Set(h.trigger.operations));
+    } else {
+      setBuilderKind('job');
+      setTriggerKind('replay');
+    }
     setDest({
       url: h.destination.url,
       method: h.destination.method,
@@ -349,12 +396,15 @@ export function HookBuilder() {
 
   const sendCount =
     mode === 'selected' ? selectedKeys.size : (browse?.total ?? null);
+  const watchNeedsColumn =
+    triggerKind === 'watch' && watchStrategy !== 'snapshot' && !watchColumn;
   const canSave =
     !!connectionId &&
     !!table &&
     dest.url.trim().length > 0 &&
     includedList.length > 0 &&
-    !(mode === 'selected' && (!singlePk || selectedKeys.size === 0));
+    !(mode === 'selected' && (!singlePk || selectedKeys.size === 0)) &&
+    !watchNeedsColumn;
 
   function buildInput(): HookInputDTO {
     const filters: FilterSpec[] = [];
@@ -420,8 +470,44 @@ export function HookBuilder() {
         backoffMaxMs: 30000,
         pageSize: 200,
       },
+      trigger:
+        triggerKind === 'cdc'
+          ? { kind: 'cdc', operations: [...cdcOps] }
+          : triggerKind === 'watch'
+            ? {
+                kind: 'watch',
+                strategy:
+                  watchStrategy === 'snapshot'
+                    ? { strategy: 'snapshot', maxTracked: 50000 }
+                    : { strategy: watchStrategy, column: watchColumn },
+                pollIntervalMs: Math.max(1000, Math.round(pollSeconds * 1000)),
+                startFrom: watchStartFrom,
+                maxPerPoll: 500,
+              }
+            : { kind: 'replay' },
       enabled: true,
     };
+  }
+
+  async function checkReadiness() {
+    if (!connectionId || !table) return;
+    setCheckingCdc(true);
+    try {
+      setReadiness(
+        await api.cdcReadiness({
+          connectionId,
+          database: database || undefined,
+          schema: schema || undefined,
+          table,
+        }),
+      );
+    } catch (err) {
+      toast.error('Readiness check failed', {
+        description: err instanceof ApiError ? err.message : String(err),
+      });
+    } finally {
+      setCheckingCdc(false);
+    }
   }
 
   async function handleSave() {
@@ -458,17 +544,24 @@ export function HookBuilder() {
           className="h-8 max-w-xs font-medium"
         />
         <div className="text-muted-foreground ml-2 text-sm">
-          {sendCount != null && (
-            <span>
-              sends{' '}
-              <span className="text-foreground font-medium">
-                {sendCount.toLocaleString()}
-              </span>{' '}
-              {mode === 'selected' ? 'selected' : ''} row
-              {sendCount === 1 ? '' : 's'} · {includedList.length}/
-              {columns.length} columns
-            </span>
-          )}
+          {builderKind === 'job'
+            ? sendCount != null && (
+                <span>
+                  sends{' '}
+                  <span className="text-foreground font-medium">
+                    {sendCount.toLocaleString()}
+                  </span>{' '}
+                  {mode === 'selected' ? 'selected' : ''} row
+                  {sendCount === 1 ? '' : 's'} · {includedList.length}/
+                  {columns.length} columns
+                </span>
+              )
+            : table && (
+                <span>
+                  streams new rows · {includedList.length}/{columns.length}{' '}
+                  columns
+                </span>
+              )}
         </div>
         <div className="ml-auto flex items-center gap-2">
           <Button variant="ghost" onClick={closeHookEditor}>
@@ -569,6 +662,7 @@ export function HookBuilder() {
                   setIncluded(new Set());
                   setFieldsPref(null);
                   setSelectedKeys(new Map());
+                  setReadiness(null);
                 }}
               >
                 <SelectTrigger className="h-8 w-52">
@@ -588,32 +682,36 @@ export function HookBuilder() {
 
               {table && (
                 <>
-                  <div className="ml-2 flex items-center overflow-hidden rounded-md border text-xs">
-                    {(['selected', 'all'] as const).map((m) => (
-                      <button
-                        key={m}
-                        disabled={m === 'selected' && !singlePk}
-                        onClick={() => setMode(m)}
-                        className={cn(
-                          'px-2.5 py-1.5 transition-colors disabled:opacity-40',
-                          mode === m
-                            ? 'bg-primary text-primary-foreground'
-                            : 'hover:bg-accent',
-                        )}
-                        title={
-                          m === 'selected' && !singlePk
-                            ? 'Needs a single-column primary key'
-                            : undefined
-                        }
-                      >
-                        {m === 'selected' ? 'Selected rows' : 'All rows'}
-                      </button>
-                    ))}
-                  </div>
-                  {mode === 'selected' && (
-                    <Badge variant="secondary" className="font-normal">
-                      {selectedKeys.size} selected
-                    </Badge>
+                  {builderKind === 'job' && (
+                    <>
+                      <div className="ml-2 flex items-center overflow-hidden rounded-md border text-xs">
+                        {(['selected', 'all'] as const).map((m) => (
+                          <button
+                            key={m}
+                            disabled={m === 'selected' && !singlePk}
+                            onClick={() => setMode(m)}
+                            className={cn(
+                              'px-2.5 py-1.5 transition-colors disabled:opacity-40',
+                              mode === m
+                                ? 'bg-primary text-primary-foreground'
+                                : 'hover:bg-accent',
+                            )}
+                            title={
+                              m === 'selected' && !singlePk
+                                ? 'Needs a single-column primary key'
+                                : undefined
+                            }
+                          >
+                            {m === 'selected' ? 'Selected rows' : 'All rows'}
+                          </button>
+                        ))}
+                      </div>
+                      {mode === 'selected' && (
+                        <Badge variant="secondary" className="font-normal">
+                          {selectedKeys.size} selected
+                        </Badge>
+                      )}
+                    </>
                   )}
                   <Button
                     variant="ghost"
@@ -631,11 +729,25 @@ export function HookBuilder() {
               )}
             </div>
 
+            {/* Hook-mode preview banner */}
+            {builderKind === 'hook' && table && (
+              <div className="flex items-start gap-2 border-b bg-blue-50 px-3 py-2 text-xs text-blue-700 dark:bg-blue-950/30 dark:text-blue-300">
+                <Radio className="mt-0.5 h-3.5 w-3.5 shrink-0" />
+                <span>
+                  <strong>Column selection only.</strong> New rows added to this
+                  table will be delivered automatically — no row selection needed.
+                  Click a column header to include or exclude it from the payload.
+                </span>
+              </div>
+            )}
+
             {/* grid */}
             <div className="scrollbar-thin min-h-0 flex-1 overflow-auto">
               {!table ? (
                 <div className="text-muted-foreground flex h-full items-center justify-center text-sm">
-                  Pick a connection and table to choose the data to send.
+                  {builderKind === 'hook'
+                    ? 'Pick a connection and table to preview data and select columns.'
+                    : 'Pick a connection and table to choose the data to send.'}
                 </div>
               ) : (
                 <table className="w-full border-collapse text-sm">
@@ -754,8 +866,9 @@ export function HookBuilder() {
             {table && (
               <div className="text-muted-foreground flex items-center gap-2 border-t px-3 py-1.5 text-xs">
                 <span>
-                  rows {rows.length ? offset + 1 : 0}–{offset + rows.length}
-                  {browse?.total != null
+                  {builderKind === 'hook' ? 'preview rows ' : 'rows '}
+                  {rows.length ? offset + 1 : 0}–{offset + rows.length}
+                  {builderKind === 'job' && browse?.total != null
                     ? ` of ${browse.estimated ? '~' : ''}${browse.total.toLocaleString()}`
                     : ''}
                 </span>
@@ -790,6 +903,198 @@ export function HookBuilder() {
         <ResizablePanel defaultSize={36} minSize={26}>
           <div className="h-full overflow-y-auto">
             <div className="space-y-5 p-4">
+              {/* Trigger — hooks only; jobs are always a one-shot replay. */}
+              {builderKind === 'hook' && (
+                <section className="space-y-2">
+                  <h3 className="text-sm font-semibold">How it listens</h3>
+                  <div className="flex overflow-hidden rounded-md border text-xs">
+                    {(
+                      [
+                        ['watch', 'Polling'],
+                        ['cdc', 'Event-based (real-time)'],
+                      ] as const
+                    ).map(([k, label]) => (
+                      <button
+                        key={k}
+                        onClick={() => setTriggerKind(k)}
+                        className={cn(
+                          'flex-1 px-2.5 py-1.5 transition-colors',
+                          triggerKind === k
+                            ? 'bg-accent font-medium'
+                            : 'text-muted-foreground hover:bg-accent/50',
+                        )}
+                      >
+                        {label}
+                      </button>
+                    ))}
+                  </div>
+
+                  {triggerKind === 'cdc' && (
+                    <div className="grid gap-2 rounded-md border p-2.5">
+                    <Label className="text-xs">Operations to deliver</Label>
+                    <div className="flex gap-3 text-xs">
+                      {(['insert', 'update', 'delete'] as const).map((op) => (
+                        <label key={op} className="flex items-center gap-1.5 capitalize">
+                          <input
+                            type="checkbox"
+                            className="accent-primary h-3.5 w-3.5"
+                            checked={cdcOps.has(op)}
+                            onChange={() =>
+                              setCdcOps((prev) => {
+                                const next = new Set(prev);
+                                if (next.has(op)) next.delete(op);
+                                else next.add(op);
+                                return next;
+                              })
+                            }
+                          />
+                          {op}
+                        </label>
+                      ))}
+                    </div>
+
+                    {/* Readiness / setup */}
+                    <div className="flex items-center justify-between">
+                      <span className="text-muted-foreground text-[11px]">
+                        Streams changes from the DB log in real time (no polling).
+                      </span>
+                      <Button
+                        size="sm"
+                        variant="outline"
+                        className="h-7"
+                        disabled={!connectionId || !table || checkingCdc}
+                        onClick={checkReadiness}
+                      >
+                        {checkingCdc ? (
+                          <Loader2 className="mr-1.5 h-3.5 w-3.5 animate-spin" />
+                        ) : null}
+                        Check readiness
+                      </Button>
+                    </div>
+
+                    {readiness && (
+                      <div className="space-y-1.5 rounded-md border p-2 text-[11px]">
+                        {!readiness.supported ? (
+                          <p className="text-amber-600">
+                            {readiness.instructions[0]}
+                          </p>
+                        ) : (
+                          <>
+                            <p
+                              className={cn(
+                                'font-medium',
+                                readiness.ready ? 'text-emerald-600' : 'text-amber-600',
+                              )}
+                            >
+                              {readiness.ready
+                                ? '✓ Ready — we’ll auto-create the publication & slot on start.'
+                                : 'Setup needed:'}
+                            </p>
+                            {readiness.checks.map((c) => (
+                              <div key={c.label} className="flex items-center gap-1.5">
+                                <span className={c.ok ? 'text-emerald-600' : 'text-destructive'}>
+                                  {c.ok ? '✓' : '✗'}
+                                </span>
+                                <span>
+                                  {c.label}
+                                  {c.detail ? ` (${c.detail})` : ''}
+                                </span>
+                              </div>
+                            ))}
+                            {readiness.instructions.map((ins, i) => (
+                              <p key={i} className="text-muted-foreground pl-1">
+                                • {ins}
+                              </p>
+                            ))}
+                          </>
+                        )}
+                      </div>
+                    )}
+                  </div>
+                )}
+
+                {triggerKind === 'watch' && (
+                  <div className="grid gap-2 rounded-md border p-2.5">
+                    <div className="grid gap-1.5">
+                      <Label className="text-xs">Detect new rows by</Label>
+                      <Select
+                        value={watchStrategy}
+                        onValueChange={(v) =>
+                          setWatchStrategy(v as 'increment' | 'timestamp' | 'snapshot')
+                        }
+                      >
+                        <SelectTrigger className="h-8">
+                          <SelectValue />
+                        </SelectTrigger>
+                        <SelectContent>
+                          <SelectItem value="increment">
+                            Incrementing column (id / sequence)
+                          </SelectItem>
+                          <SelectItem value="timestamp">
+                            Timestamp column (created/updated at)
+                          </SelectItem>
+                          <SelectItem value="snapshot">
+                            New primary keys (small tables / UUIDs)
+                          </SelectItem>
+                        </SelectContent>
+                      </Select>
+                    </div>
+
+                    {watchStrategy !== 'snapshot' && (
+                      <div className="grid gap-1.5">
+                        <Label className="text-xs">
+                          {watchStrategy === 'timestamp' ? 'Timestamp' : 'Incrementing'}{' '}
+                          column
+                        </Label>
+                        <Select value={watchColumn} onValueChange={setWatchColumn}>
+                          <SelectTrigger className="h-8">
+                            <SelectValue placeholder="Select a column" />
+                          </SelectTrigger>
+                          <SelectContent>
+                            {columns.map((c) => (
+                              <SelectItem key={c.name} value={c.name}>
+                                {c.name}
+                              </SelectItem>
+                            ))}
+                          </SelectContent>
+                        </Select>
+                      </div>
+                    )}
+
+                    <div className="grid grid-cols-2 gap-2">
+                      <NumField
+                        label="Poll every (sec)"
+                        value={pollSeconds}
+                        min={1}
+                        onChange={setPollSeconds}
+                      />
+                      <div className="grid gap-1.5">
+                        <Label className="text-xs">Start from</Label>
+                        <Select
+                          value={watchStartFrom}
+                          onValueChange={(v) =>
+                            setWatchStartFrom(v as 'now' | 'beginning')
+                          }
+                        >
+                          <SelectTrigger className="h-8">
+                            <SelectValue />
+                          </SelectTrigger>
+                          <SelectContent>
+                            <SelectItem value="now">New rows from now</SelectItem>
+                            <SelectItem value="beginning">All existing + new</SelectItem>
+                          </SelectContent>
+                        </Select>
+                      </div>
+                    </div>
+                      <p className="text-muted-foreground text-[11px]">
+                        The hook keeps polling this table and delivers new rows as
+                        they appear.
+                      </p>
+                    </div>
+                  )}
+                </section>
+              )}
+
               {/* Payload */}
               <section>
                 <h3 className="mb-2 text-sm font-semibold">What gets sent</h3>
@@ -997,14 +1302,16 @@ export function HookBuilder() {
               <section className="space-y-2">
                 <h3 className="text-sm font-semibold">Delivery</h3>
                 <div className="grid grid-cols-2 gap-2">
-                  <NumField
-                    label="Batch size"
-                    value={delivery.batchSize}
-                    min={1}
-                    onChange={(v) =>
-                      setDelivery((d) => ({ ...d, batchSize: v }))
-                    }
-                  />
+                  {builderKind === 'job' && (
+                    <NumField
+                      label="Batch size"
+                      value={delivery.batchSize}
+                      min={1}
+                      onChange={(v) =>
+                        setDelivery((d) => ({ ...d, batchSize: v }))
+                      }
+                    />
+                  )}
                   <NumField
                     label="Max attempts"
                     value={delivery.maxAttempts}
@@ -1013,14 +1320,16 @@ export function HookBuilder() {
                       setDelivery((d) => ({ ...d, maxAttempts: v }))
                     }
                   />
-                  <NumField
-                    label="Delay between (ms)"
-                    value={delivery.minDelayMs}
-                    min={0}
-                    onChange={(v) =>
-                      setDelivery((d) => ({ ...d, minDelayMs: v }))
-                    }
-                  />
+                  {builderKind === 'job' && (
+                    <NumField
+                      label="Delay between (ms)"
+                      value={delivery.minDelayMs}
+                      min={0}
+                      onChange={(v) =>
+                        setDelivery((d) => ({ ...d, minDelayMs: v }))
+                      }
+                    />
+                  )}
                   <NumField
                     label="Timeout (ms)"
                     value={delivery.timeoutMs}
@@ -1030,28 +1339,31 @@ export function HookBuilder() {
                     }
                   />
                 </div>
-                <div className="grid gap-1.5">
-                  <Label className="text-xs">On failure</Label>
-                  <Select
-                    value={delivery.onError}
-                    onValueChange={(v) =>
-                      setDelivery((d) => ({
-                        ...d,
-                        onError: v as 'continue' | 'abort',
-                      }))
-                    }
-                  >
-                    <SelectTrigger className="h-8">
-                      <SelectValue />
-                    </SelectTrigger>
-                    <SelectContent>
-                      <SelectItem value="continue">
-                        Log &amp; continue
-                      </SelectItem>
-                      <SelectItem value="abort">Stop the run</SelectItem>
-                    </SelectContent>
-                  </Select>
-                </div>
+                {/* On-failure abort is a job concept — a listener must never stop on one bad delivery. */}
+                {builderKind === 'job' && (
+                  <div className="grid gap-1.5">
+                    <Label className="text-xs">On failure</Label>
+                    <Select
+                      value={delivery.onError}
+                      onValueChange={(v) =>
+                        setDelivery((d) => ({
+                          ...d,
+                          onError: v as 'continue' | 'abort',
+                        }))
+                      }
+                    >
+                      <SelectTrigger className="h-8">
+                        <SelectValue />
+                      </SelectTrigger>
+                      <SelectContent>
+                        <SelectItem value="continue">
+                          Log &amp; continue
+                        </SelectItem>
+                        <SelectItem value="abort">Stop the run</SelectItem>
+                      </SelectContent>
+                    </Select>
+                  </div>
+                )}
               </section>
             </div>
           </div>

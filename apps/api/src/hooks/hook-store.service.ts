@@ -95,6 +95,7 @@ export class HookStoreService {
       destination: this.withSecret(sanitized, secret),
       transform: JSON.parse(row.transformJson),
       delivery: JSON.parse(row.deliveryJson),
+      trigger: row.triggerJson ? JSON.parse(row.triggerJson) : { kind: 'replay' },
       enabled: row.enabled,
       createdAt: row.createdAt.toISOString(),
       updatedAt: row.updatedAt.toISOString(),
@@ -136,6 +137,7 @@ export class HookStoreService {
         authEnc: secret ? this.crypto.encrypt(secret) : null,
         transformJson: JSON.stringify(input.transform),
         deliveryJson: JSON.stringify(input.delivery),
+        triggerJson: JSON.stringify(input.trigger),
         enabled: input.enabled,
       },
     });
@@ -164,6 +166,7 @@ export class HookStoreService {
         authEnc,
         transformJson: JSON.stringify(input.transform),
         deliveryJson: JSON.stringify(input.delivery),
+        triggerJson: JSON.stringify(input.trigger),
         enabled: input.enabled,
       },
     });
@@ -201,6 +204,9 @@ export class HookStoreService {
       destination: this.withSecret(s.destination, this.decryptSecret(s.authEnc)),
       transform: s.transform,
       delivery: s.delivery,
+      // A snapshot is only used to execute a replay run; the trigger is resolved
+      // live for watch hooks, so a placeholder is fine here.
+      trigger: { kind: 'replay' },
       enabled: true,
     };
   }

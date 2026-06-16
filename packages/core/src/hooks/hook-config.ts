@@ -91,12 +91,53 @@ export const hookDeliverySchema = z.object({
 /* Hook                                                                       */
 /* -------------------------------------------------------------------------- */
 
+/* -------------------------------------------------------------------------- */
+/* Trigger — when the hook runs                                               */
+/* -------------------------------------------------------------------------- */
+
+export const watchStrategySchema = z.discriminatedUnion('strategy', [
+  // Track a strictly-increasing column (auto-increment id / sequence).
+  z.object({ strategy: z.literal('increment'), column: z.string().min(1) }),
+  // Track a created_at / updated_at column.
+  z.object({ strategy: z.literal('timestamp'), column: z.string().min(1) }),
+  // Diff the set of seen primary keys (for UUID / non-monotonic keys).
+  z.object({
+    strategy: z.literal('snapshot'),
+    maxTracked: z.coerce.number().int().min(100).max(200_000).default(50_000),
+  }),
+]);
+
+export const cdcOperationSchema = z.enum(['insert', 'update', 'delete']);
+
+export const hookTriggerSchema = z.discriminatedUnion('kind', [
+  // Run on demand (replay the source when you press Run).
+  z.object({ kind: z.literal('replay') }),
+  // Continuously poll the source for new rows and deliver them live.
+  z.object({
+    kind: z.literal('watch'),
+    strategy: watchStrategySchema,
+    pollIntervalMs: z.coerce.number().int().min(1000).max(3_600_000).default(5000),
+    /** `now` ignores existing rows and only delivers ones added after start. */
+    startFrom: z.enum(['beginning', 'now']).default('now'),
+    /** Max rows delivered per poll cycle (backpressure). */
+    maxPerPoll: z.coerce.number().int().min(1).max(5000).default(500),
+  }),
+  // Event-based: stream changes from the database's transaction log (CDC).
+  // Real-time, no polling. Requires engine support + log enabled (e.g. Postgres
+  // logical replication). The publication/slot are auto-provisioned.
+  z.object({
+    kind: z.literal('cdc'),
+    operations: z.array(cdcOperationSchema).min(1).default(['insert', 'update', 'delete']),
+  }),
+]);
+
 export const hookInputSchema = z.object({
   name: z.string().min(1, 'Name is required').max(120),
   source: hookSourceSchema,
   destination: hookDestinationSchema,
   transform: hookTransformSchema,
   delivery: hookDeliverySchema.default({}),
+  trigger: hookTriggerSchema.default({ kind: 'replay' }),
   enabled: z.boolean().default(true),
 });
 
@@ -121,6 +162,14 @@ export const skipSchema = z.object({
   sequences: z.array(z.coerce.number().int().min(0)).min(1).max(10_000),
 });
 
+/** Check whether a connection+table can do event-based (CDC) delivery. */
+export const cdcReadinessSchema = z.object({
+  connectionId: z.string().min(1),
+  database: z.string().optional(),
+  schema: z.string().optional(),
+  table: z.string().min(1),
+});
+
 /* -------------------------------------------------------------------------- */
 /* Inferred types + DTOs surfaced to the web client                           */
 /* -------------------------------------------------------------------------- */
@@ -130,7 +179,23 @@ export type HookAuth = z.infer<typeof hookAuthSchema>;
 export type HookDestination = z.infer<typeof hookDestinationSchema>;
 export type HookTransformConfig = z.infer<typeof hookTransformSchema>;
 export type HookDeliveryConfig = z.infer<typeof hookDeliverySchema>;
+export type HookTrigger = z.infer<typeof hookTriggerSchema>;
+export type WatchStrategyConfig = z.infer<typeof watchStrategySchema>;
+export type CdcOperation = z.infer<typeof cdcOperationSchema>;
+export type CdcReadinessDTO = z.infer<typeof cdcReadinessSchema>;
 export type HookInputDTO = z.infer<typeof hookInputSchema>;
+
+/** Result of a CDC readiness probe — drives the builder's setup panel. */
+export interface CdcReadiness {
+  engine: string;
+  /** Whether this engine has an event-based path implemented at all. */
+  supported: boolean;
+  /** Whether the DB is configured and ready to stream right now. */
+  ready: boolean;
+  checks: { label: string; ok: boolean; detail?: string }[];
+  /** Manual steps the user must do (e.g. set wal_level=logical + restart). */
+  instructions: string[];
+}
 export type HookPreviewDTO = z.infer<typeof hookPreviewSchema>;
 export type StartRunDTO = z.infer<typeof startRunSchema>;
 export type SkipDTO = z.infer<typeof skipSchema>;
@@ -143,6 +208,7 @@ export type HookRunStatus =
   | 'failed'
   | 'canceling'
   | 'canceled'
+  | 'paused' // stopped by the user; resumable in place (same run)
   | 'interrupted';
 
 export type DeliveryStatus = 'success' | 'failed' | 'skipped';
@@ -155,6 +221,7 @@ export interface Hook {
   destination: HookDestination;
   transform: HookTransformConfig;
   delivery: HookDeliveryConfig;
+  trigger: HookTrigger;
   enabled: boolean;
   createdAt: string;
   updatedAt: string;
@@ -169,6 +236,8 @@ export interface HookRun {
   failedCount: number;
   skippedCount: number;
   totalCount: number | null;
+  /** Batch size from the config snapshot used to create this run. */
+  batchSize: number;
   error: string | null;
   startedAt: string;
   finishedAt: string | null;

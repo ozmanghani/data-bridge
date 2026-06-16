@@ -1,5 +1,6 @@
 'use client';
 
+import { useEffect, useRef } from 'react';
 import {
   useMutation,
   useQuery,
@@ -147,6 +148,33 @@ export function useStartHookRun(hookId: string) {
   });
 }
 
+export function useStartWatch(hookId: string) {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: () => api.startWatch(hookId),
+    onSuccess: () => qc.invalidateQueries({ queryKey: queryKeys.hookRuns(hookId) }),
+  });
+}
+
+export function useStopWatch(hookId: string) {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: () => api.stopWatch(hookId),
+    onSuccess: () => qc.invalidateQueries({ queryKey: queryKeys.hookRuns(hookId) }),
+  });
+}
+
+export function useRetryFailed(hookId: string) {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: (runId: string) => api.retryFailedDeliveries(hookId, runId),
+    onSuccess: (_d, runId) => {
+      qc.invalidateQueries({ queryKey: queryKeys.hookRuns(hookId) });
+      qc.invalidateQueries({ queryKey: queryKeys.hookDeliveries(hookId, runId) });
+    },
+  });
+}
+
 export function useCancelHookRun(hookId: string) {
   const qc = useQueryClient();
   return useMutation({
@@ -178,7 +206,10 @@ export function useHookDeliveries(
   live: boolean,
   opts: { status?: 'success' | 'failed' | 'skipped'; from?: number; to?: number } = {},
 ) {
-  return useQuery({
+  const qc = useQueryClient();
+  const prevLiveRef = useRef(live);
+
+  const query = useQuery({
     queryKey:
       hookId && runId
         ? [...queryKeys.hookDeliveries(hookId, runId), opts]
@@ -190,7 +221,23 @@ export function useHookDeliveries(
       }),
     enabled: !!hookId && !!runId,
     refetchInterval: live ? 1500 : false,
+    staleTime: 0,
   });
+
+  const { refetch } = query;
+
+  // When a run transitions from active → terminal, fire one final refetch so
+  // deliveries written in the gap between the last poll and completion are shown.
+  // Also invalidate all sibling windows so navigating to another page is fresh.
+  useEffect(() => {
+    if (prevLiveRef.current && !live && hookId && runId) {
+      void refetch();
+      void qc.invalidateQueries({ queryKey: queryKeys.hookDeliveries(hookId, runId) });
+    }
+    prevLiveRef.current = live;
+  }, [live, hookId, runId, refetch, qc]);
+
+  return query;
 }
 
 export function useSkipDeliveries(hookId: string, runId: string) {

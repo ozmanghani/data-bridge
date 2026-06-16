@@ -14,6 +14,7 @@ import {
   AppError,
   BadRequestError,
   ConflictError,
+  type DeliveryStatus,
   type HookDelivery,
   type HookRun,
   type HookRunStatus,
@@ -27,6 +28,7 @@ import type {
 import { AdapterPoolService } from '../connections/adapter-pool.service';
 import { PrismaService } from '../common/prisma.service';
 import { HookStoreService } from './hook-store.service';
+import { DeliveryService, sleep } from './delivery.service';
 import { RunRegistryService } from './run-registry.service';
 import {
   HOOK_RUNS_QUEUE,
@@ -51,8 +53,59 @@ export class HookRunService implements OnModuleInit {
     private readonly store: HookStoreService,
     private readonly registry: RunRegistryService,
     private readonly pool: AdapterPoolService,
+    private readonly delivery: DeliveryService,
     @InjectQueue(HOOK_RUNS_QUEUE) private readonly queue: Queue<HookRunJob>,
   ) {}
+
+  /**
+   * Re-send the failed deliveries of a run by re-POSTing their captured request
+   * bodies to the hook's CURRENT destination. Works for every hook type
+   * (replay / watch / cdc) — ideal after fixing a bad URL or a down endpoint.
+   * A delivery that succeeds flips from failed → success (counters adjust).
+   */
+  async resendFailed(hookId: string, runId: string): Promise<HookRun> {
+    const run = await this.getRunRow(runId);
+    if (run.hookId !== hookId) throw new NotFoundError(`Run "${runId}" not found`);
+    const hook = await this.store.resolve(hookId);
+    const failed = await this.prisma.hookDelivery.findMany({
+      where: { runId, status: 'failed' },
+      orderBy: { sequence: 'asc' },
+      take: 2000,
+    });
+    if (failed.length === 0) throw new BadRequestError('No failed deliveries to retry.');
+
+    const signal = new AbortController().signal;
+    for (const d of failed) {
+      let body: unknown = null;
+      if (d.requestBody) {
+        try {
+          body = JSON.parse(d.requestBody);
+        } catch {
+          body = d.requestBody;
+        }
+      }
+      const idem = hook.destination.idempotency ? `${runId}:${d.sequence}` : undefined;
+      const outcome = await this.delivery.send(
+        body,
+        hook.destination,
+        hook.delivery,
+        signal,
+        idem,
+      );
+      await this.recordDelivery(
+        runId,
+        {
+          sequence: d.sequence,
+          rowIndex: d.rowIndex,
+          rowCount: d.rowCount,
+          rowKeys: d.rowKeysJson ? (JSON.parse(d.rowKeysJson) as unknown[]) : null,
+        },
+        outcome,
+      );
+      if (hook.delivery.minDelayMs) await sleep(hook.delivery.minDelayMs);
+    }
+    return this.getRun(hookId, runId);
+  }
 
   /* ----- prepare (queue without sending) ----- */
 
@@ -65,7 +118,9 @@ export class HookRunService implements OnModuleInit {
     hookId: string,
     opts: { onlyExisting?: boolean } = {},
   ): Promise<HookRun | null> {
-    await this.store.get(hookId);
+    const hook = await this.store.get(hookId);
+    // Drafts model a finite replay; watch hooks are live listeners, not drafts.
+    if (hook.trigger.kind !== 'replay') return null;
     // Don't clobber an in-flight run with a draft.
     const active = await this.prisma.hookRun.findFirst({
       where: { hookId, status: { in: ACTIVE } },
@@ -128,6 +183,14 @@ export class HookRunService implements OnModuleInit {
         'A run is already in progress for this hook. Cancel it before starting another.',
       );
     }
+
+    // Resume the most recent paused/stopped run in place (one run per job)
+    // rather than spawning a new one each time. A finished run starts fresh.
+    const latest = await this.prisma.hookRun.findFirst({
+      where: { hookId, status: { in: ['paused', 'canceled', 'interrupted', 'failed'] } },
+      orderBy: { startedAt: 'desc' },
+    });
+    if (latest) return this.resume(hookId, latest.id);
 
     await this.ensureQueueReady();
     const id = randomUUID();
@@ -213,10 +276,8 @@ export class HookRunService implements OnModuleInit {
     const row = await this.getRunRow(runId);
     if (row.hookId !== hookId)
       throw new NotFoundError(`Run "${runId}" not found`);
-    if (
-      !TERMINAL.includes(row.status as HookRunStatus) ||
-      row.status === 'completed'
-    ) {
+    const resumable: HookRunStatus[] = ['failed', 'canceled', 'paused', 'interrupted'];
+    if (!resumable.includes(row.status as HookRunStatus)) {
       throw new ConflictError(
         `Run "${runId}" cannot be resumed (status: ${row.status}).`,
       );
@@ -338,6 +399,8 @@ export class HookRunService implements OnModuleInit {
   async skipDeliveries(runId: string, sequences: number[]): Promise<number> {
     const run = await this.getRunRow(runId);
     const batchSize = this.snapshotBatchSize(run.configSnapshotJson);
+    const totalCount = run.totalCount;
+
     const existing = await this.prisma.hookDelivery.findMany({
       where: { runId, sequence: { in: sequences } },
       select: { sequence: true },
@@ -346,6 +409,20 @@ export class HookRunService implements OnModuleInit {
     const fresh = [...new Set(sequences)].filter((s) => !taken.has(s));
     if (fresh.length === 0) return 0;
 
+    // Compute the actual row count for each sequence. The last batch may be
+    // smaller than batchSize when totalCount is not perfectly divisible.
+    const lastSeq =
+      totalCount != null ? Math.ceil(totalCount / batchSize) - 1 : null;
+    const lastBatchSize =
+      lastSeq != null && totalCount != null
+        ? totalCount - lastSeq * batchSize
+        : batchSize;
+
+    const rowCountFor = (seq: number): number =>
+      lastSeq != null && seq === lastSeq ? lastBatchSize : batchSize;
+
+    const skippedRows = fresh.reduce((acc, s) => acc + rowCountFor(s), 0);
+
     await this.prisma.$transaction([
       this.prisma.hookDelivery.createMany({
         data: fresh.map((sequence) => ({
@@ -353,14 +430,14 @@ export class HookRunService implements OnModuleInit {
           runId,
           sequence,
           rowIndex: sequence * batchSize,
-          rowCount: batchSize,
+          rowCount: rowCountFor(sequence),
           status: 'skipped',
           attempts: 0,
         })),
       }),
       this.prisma.hookRun.update({
         where: { id: runId },
-        data: { skippedCount: { increment: fresh.length * batchSize } },
+        data: { skippedCount: { increment: skippedRows } },
       }),
     ]);
     return fresh.length;
@@ -533,16 +610,21 @@ export class HookRunService implements OnModuleInit {
       this.logger.warn(`Skipped run recovery: ${(err as Error).message}`);
       return;
     }
+    let recovered = 0;
     for (const r of rows) {
+      // Only replay runs belong to this queue. Watch/CDC runs are also `running`
+      // but are owned by their own services — never re-enqueue those here.
+      const hook = await this.store.get(r.hookId).catch(() => null);
+      if (!hook || hook.trigger.kind !== 'replay') continue;
       // Deterministic jobId means this is a no-op if the job already exists.
       await this.enqueue(r.id, r.hookId).catch((err) =>
         this.logger.warn(
           `Could not re-enqueue run ${r.id}: ${(err as Error).message}`,
         ),
       );
+      recovered++;
     }
-    if (rows.length)
-      this.logger.log(`Recovered ${rows.length} interrupted hook run(s)`);
+    if (recovered) this.logger.log(`Recovered ${recovered} interrupted replay run(s)`);
   }
 
   /* ----- mappers ----- */
@@ -557,6 +639,7 @@ export class HookRunService implements OnModuleInit {
       failedCount: row.failedCount,
       skippedCount: row.skippedCount,
       totalCount: row.totalCount,
+      batchSize: this.snapshotBatchSize(row.configSnapshotJson),
       error: row.error,
       startedAt: row.startedAt.toISOString(),
       finishedAt: row.finishedAt ? row.finishedAt.toISOString() : null,
@@ -570,7 +653,7 @@ export class HookRunService implements OnModuleInit {
       sequence: row.sequence,
       rowIndex: row.rowIndex,
       rowCount: row.rowCount,
-      status: row.status as 'success' | 'failed',
+      status: row.status as DeliveryStatus,
       httpStatus: row.httpStatus,
       attempts: row.attempts,
       error: row.error,

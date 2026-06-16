@@ -1,10 +1,10 @@
 'use client';
 
-import { Ban, Loader2, RotateCcw } from 'lucide-react';
+import { Ban, Loader2, Play, RotateCcw } from 'lucide-react';
 import { toast } from 'sonner';
 import type { HookRun, HookRunStatus } from '@relay/core';
 import { ApiError } from '@/lib/api';
-import { useCancelHookRun, useStartHookRun } from '@/lib/queries';
+import { useCancelHookRun, useRetryFailed, useStartHookRun } from '@/lib/queries';
 import { cn } from '@/lib/utils';
 import { Button } from '@/components/ui/button';
 import { DeliveryMonitor } from './delivery-log';
@@ -17,6 +17,7 @@ const STATUS_STYLES: Record<HookRunStatus, string> = {
   failed: 'bg-destructive/15 text-destructive',
   canceling: 'bg-amber-500/15 text-amber-600 dark:text-amber-400',
   canceled: 'bg-muted text-muted-foreground',
+  paused: 'bg-amber-500/15 text-amber-600 dark:text-amber-400',
   interrupted: 'bg-amber-500/15 text-amber-600 dark:text-amber-400',
 };
 
@@ -37,7 +38,7 @@ export function RunStatusBadge({ status }: { status: HookRunStatus }) {
 }
 
 const ACTIVE: HookRunStatus[] = ['queued', 'running', 'canceling'];
-const RESUMABLE: HookRunStatus[] = ['failed', 'canceled', 'interrupted'];
+const RESUMABLE: HookRunStatus[] = ['failed', 'canceled', 'paused', 'interrupted'];
 
 function Stat({
   label,
@@ -71,16 +72,18 @@ function Stat({
 export function RunDetail({
   hookId,
   run,
-  batchSize,
   endpoint,
+  isHook,
 }: {
   hookId: string;
   run: HookRun;
-  batchSize: number;
   endpoint: { url: string; method: string };
+  /** Hooks (watch/CDC) are continuous listeners: no Cancel/Resume, no progress. */
+  isHook: boolean;
 }) {
   const cancel = useCancelHookRun(hookId);
   const startRun = useStartHookRun(hookId);
+  const retryFailed = useRetryFailed(hookId);
 
   const isActive = ACTIVE.includes(run.status);
   const total = run.totalCount;
@@ -114,8 +117,8 @@ export function RunDetail({
 
   async function handleRetry() {
     try {
-      await startRun.mutateAsync({ retryFailedOf: run.id });
-      toast.success('Retrying failed rows with the current config');
+      await retryFailed.mutateAsync(run.id);
+      toast.success('Resending failed deliveries with the current config');
     } catch (err) {
       toast.error('Could not retry', {
         description: err instanceof ApiError ? err.message : String(err),
@@ -123,7 +126,8 @@ export function RunDetail({
     }
   }
 
-  const canRetry = !isActive && run.failedCount > 0;
+  // Available whenever there are failures — including a live (CDC/watch) run.
+  const canRetry = run.failedCount > 0;
 
   return (
     <div className="flex min-h-0 flex-1 flex-col">
@@ -131,12 +135,22 @@ export function RunDetail({
       <div className="flex items-center gap-3 px-4 pt-3">
         <RunStatusBadge status={run.status} />
         <span className="text-muted-foreground text-xs">
-          started {new Date(run.startedAt).toLocaleString()}
+          {isHook
+            ? isActive
+              ? `listening since ${new Date(run.startedAt).toLocaleString()}`
+              : `last active ${new Date(run.startedAt).toLocaleString()}`
+            : `started ${new Date(run.startedAt).toLocaleString()}`}
         </span>
         <div className="ml-auto flex items-center gap-2">
-          {isActive && (
+          {/* Cancel/Resume are job controls. A hook is started/stopped from the
+              panel header above — "resuming" one would re-stream the whole table. */}
+          {!isHook && isActive && (
             <Button size="sm" variant="outline" onClick={handleCancel} disabled={cancel.isPending}>
-              <Ban className="mr-1.5 h-3.5 w-3.5" />
+              {cancel.isPending ? (
+                <Loader2 className="mr-1.5 h-3.5 w-3.5 animate-spin" />
+              ) : (
+                <Ban className="mr-1.5 h-3.5 w-3.5" />
+              )}
               Cancel
             </Button>
           )}
@@ -145,57 +159,80 @@ export function RunDetail({
               size="sm"
               variant="outline"
               onClick={handleRetry}
-              disabled={startRun.isPending}
+              disabled={retryFailed.isPending}
             >
-              <RotateCcw className="mr-1.5 h-3.5 w-3.5" />
+              {retryFailed.isPending ? (
+                <Loader2 className="mr-1.5 h-3.5 w-3.5 animate-spin" />
+              ) : (
+                <RotateCcw className="mr-1.5 h-3.5 w-3.5" />
+              )}
               Retry failed ({run.failedCount})
             </Button>
           )}
-          {RESUMABLE.includes(run.status) && (
+          {!isHook && RESUMABLE.includes(run.status) && (
             <Button
               size="sm"
               variant="outline"
               onClick={handleResume}
               disabled={startRun.isPending}
             >
-              <RotateCcw className="mr-1.5 h-3.5 w-3.5" />
+              {startRun.isPending ? (
+                <Loader2 className="mr-1.5 h-3.5 w-3.5 animate-spin" />
+              ) : (
+                <Play className="mr-1.5 h-3.5 w-3.5" />
+              )}
               Resume
             </Button>
           )}
         </div>
       </div>
 
-      {/* Stat cards */}
-      <div className="grid grid-cols-3 gap-2 px-4 py-3 sm:grid-cols-6">
-        <Stat label="Total" value={total != null ? total.toLocaleString() : '—'} />
-        <Stat label="Delivered" value={run.sentCount.toLocaleString()} tone="success" />
-        <Stat label="Failed" value={run.failedCount.toLocaleString()} tone="danger" />
-        <Stat label="Skipped" value={run.skippedCount.toLocaleString()} tone="warn" />
-        <Stat
-          label="Queued"
-          value={pending != null ? pending.toLocaleString() : '—'}
-          tone="muted"
-        />
-        <Stat
-          label="Success"
-          value={successRate != null ? `${successRate}%` : '—'}
-        />
-      </div>
-
-      {/* Progress */}
-      {pct != null && (
-        <div className="px-4 pb-3">
-          <div className="bg-muted h-1.5 w-full overflow-hidden rounded-full">
-            <div
-              className="bg-primary h-full rounded-full transition-all"
-              style={{ width: `${pct}%` }}
+      {/* Stat cards — a listener has no finite total/queue, so it shows a
+          delivered/failed/skipped breakdown instead of progress-to-completion. */}
+      {isHook ? (
+        <div className="grid grid-cols-2 gap-2 px-4 py-3 sm:grid-cols-4">
+          <Stat label="Delivered" value={run.sentCount.toLocaleString()} tone="success" />
+          <Stat label="Failed" value={run.failedCount.toLocaleString()} tone="danger" />
+          <Stat label="Skipped" value={run.skippedCount.toLocaleString()} tone="warn" />
+          <Stat
+            label="Success"
+            value={successRate != null ? `${successRate}%` : '—'}
+          />
+        </div>
+      ) : (
+        <>
+          <div className="grid grid-cols-3 gap-2 px-4 py-3 sm:grid-cols-6">
+            <Stat label="Total" value={total != null ? total.toLocaleString() : '—'} />
+            <Stat label="Delivered" value={run.sentCount.toLocaleString()} tone="success" />
+            <Stat label="Failed" value={run.failedCount.toLocaleString()} tone="danger" />
+            <Stat label="Skipped" value={run.skippedCount.toLocaleString()} tone="warn" />
+            <Stat
+              label="Queued"
+              value={pending != null ? pending.toLocaleString() : '—'}
+              tone="muted"
+            />
+            <Stat
+              label="Success"
+              value={successRate != null ? `${successRate}%` : '—'}
             />
           </div>
-        </div>
+
+          {/* Progress */}
+          {pct != null && (
+            <div className="px-4 pb-3">
+              <div className="bg-muted h-1.5 w-full overflow-hidden rounded-full">
+                <div
+                  className="bg-primary h-full rounded-full transition-all"
+                  style={{ width: `${pct}%` }}
+                />
+              </div>
+            </div>
+          )}
+        </>
       )}
 
       {run.error && (
-        <p className="border-y bg-destructive/10 text-destructive px-4 py-2 text-xs">
+        <p className="border-y bg-destructive/10 text-destructive px-4 py-2 text-xs break-words">
           {run.error}
         </p>
       )}
@@ -206,7 +243,7 @@ export function RunDetail({
           runId={run.id}
           live={isActive}
           totalRows={total}
-          batchSize={batchSize}
+          batchSize={run.batchSize}
           endpoint={endpoint}
         />
       </div>
