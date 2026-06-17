@@ -122,9 +122,11 @@ export const hookTriggerSchema = z.discriminatedUnion('kind', [
     /** Max rows delivered per poll cycle (backpressure). */
     maxPerPoll: z.coerce.number().int().min(1).max(5000).default(500),
   }),
-  // Event-based: stream changes from the database's transaction log (CDC).
-  // Real-time, no polling. Requires engine support + log enabled (e.g. Postgres
-  // logical replication). The publication/slot are auto-provisioned.
+  // Event-based: stream changes from the database's change log (CDC).
+  // Real-time, no polling. Mechanism depends on the engine: Postgres logical
+  // replication, MySQL binlog, MongoDB change streams, or Redis keyspace
+  // notifications. Requirements (and a readiness probe) are surfaced per engine;
+  // any server-side objects (e.g. Postgres publication/slot) are auto-provisioned.
   z.object({
     kind: z.literal('cdc'),
     operations: z.array(cdcOperationSchema).min(1).default(['insert', 'update', 'delete']),

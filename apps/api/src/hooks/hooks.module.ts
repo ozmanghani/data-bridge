@@ -11,6 +11,12 @@ import { HookWatchService } from './hook-watch.service';
 import { HooksController } from './hooks.controller';
 import { RunRegistryService } from './run-registry.service';
 import { HOOK_RUNS_QUEUE, HOOK_WATCH_QUEUE } from './hooks.types';
+import { CDC_PROVIDERS, type CdcProvider } from './cdc/cdc-provider';
+import { PostgresCdcProvider } from './cdc/providers/postgres-cdc.provider';
+import { MysqlCdcProvider } from './cdc/providers/mysql-cdc.provider';
+import { MongodbCdcProvider } from './cdc/providers/mongodb-cdc.provider';
+import { RedisCdcProvider } from './cdc/providers/redis-cdc.provider';
+import { SqliteCdcProvider } from './cdc/providers/sqlite-cdc.provider';
 
 @Module({
   imports: [
@@ -28,6 +34,23 @@ import { HOOK_RUNS_QUEUE, HOOK_WATCH_QUEUE } from './hooks.types';
     RunRegistryService,
     HookRunProcessor,
     HookWatchProcessor,
+    // CDC providers (one per engine) + the aggregate the orchestrator injects.
+    PostgresCdcProvider,
+    MysqlCdcProvider,
+    MongodbCdcProvider,
+    RedisCdcProvider,
+    SqliteCdcProvider,
+    {
+      provide: CDC_PROVIDERS,
+      inject: [
+        PostgresCdcProvider,
+        MysqlCdcProvider,
+        MongodbCdcProvider,
+        RedisCdcProvider,
+        SqliteCdcProvider,
+      ],
+      useFactory: (...providers: CdcProvider[]): CdcProvider[] => providers,
+    },
   ],
 })
 export class HooksModule {}

@@ -1,16 +1,19 @@
 /**
- * Event-based ("CDC") hooks for PostgreSQL via **logical replication** — the
- * same mechanism Debezium/Fivetran use. Changes are streamed from the WAL in
- * real time (no polling), decoded with the built-in `pgoutput` plugin (no server
- * extension needed). We auto-provision the publication + replication slot; the
- * one thing we can't automate is `wal_level=logical` (it needs a server restart),
- * so `readiness()` checks it and tells the user exactly what to do.
+ * Event-based ("CDC") hooks — engine-agnostic orchestrator.
  *
- * Scope: PostgreSQL only for now (other engines fall back to polling). A held
- * replication connection per active hook; the slot persists the confirmed LSN,
- * so a restart resumes exactly where it left off.
+ * Each engine captures changes differently (Postgres logical replication, MySQL
+ * binlog, MongoDB change streams, Redis keyspace notifications); that variation
+ * lives behind the {@link CdcProvider} interface. This service is the shared
+ * machinery around them: pick the provider for a connection's engine, manage the
+ * run lifecycle (one resumable run per hook), and implement the per-change
+ * pipeline — dedupe replays → render → deliver → record → persist the cursor.
+ *
+ * A held streaming connection per active hook lives in `streams`. Durable engines
+ * (pg/mysql/mongo) persist a cursor so a restart resumes exactly; Redis is
+ * real-time only (see {@link RedisCdcProvider}).
  */
 import {
+  Inject,
   Injectable,
   Logger,
   type OnModuleDestroy,
@@ -19,55 +22,46 @@ import {
 import {
   BadRequestError,
   ConflictError,
-  NotFoundError,
   renderRow,
   type CdcOperation,
   type CdcReadiness,
   type CdcReadinessDTO,
   type ConnectionConfig,
+  type DatabaseEngine,
   type HookRun,
 } from '@relay/core';
-import { LogicalReplicationService, PgoutputPlugin } from 'pg-logical-replication';
 import { randomUUID } from 'node:crypto';
-import { AdapterPoolService } from '../connections/adapter-pool.service';
 import { ConnectionStoreService } from '../connections/connection-store.service';
 import { PrismaService } from '../common/prisma.service';
-import { DeliveryService } from './delivery.service';
 import { HookRunService } from './hook-run.service';
 import { HookStoreService } from './hook-store.service';
+import { DeliveryService } from './delivery.service';
 import type { ResolvedHook } from './hooks.types';
+import {
+  CDC_PROVIDERS,
+  type CdcChange,
+  type CdcProvider,
+  type CdcStreamHandle,
+} from './cdc/cdc-provider';
 
+/** Live runtime state for one active CDC stream. */
 interface Stream {
-  service: LogicalReplicationService;
+  handle: CdcStreamHandle;
+  provider: CdcProvider;
   runId: string;
   seq: number;
-  /** Highest WAL position already processed — guards against replay dupes. */
-  lastLsn: string | null;
+  /** Highest cursor already processed — guards against replay dupes on reconnect. */
+  watermark: string | null;
 }
 
-/** Read the persisted last-delivered LSN from a run's cursorJson. */
-function lsnOf(cursorJson: string | null): string | null {
+/** Read the persisted resume cursor from a run's cursorJson (legacy `lsn` ok). */
+function readCursor(cursorJson: string | null): string | null {
   if (!cursorJson) return null;
   try {
-    return (JSON.parse(cursorJson) as { lsn?: string }).lsn ?? null;
+    const o = JSON.parse(cursorJson) as { cursor?: string; lsn?: string };
+    return o.cursor ?? o.lsn ?? null;
   } catch {
     return null;
-  }
-}
-
-/** Compare Postgres LSNs ("H/L" hex). Returns true if `a` is strictly after `b`. */
-function lsnAfter(a: string, b: string | null): boolean {
-  if (!b) return true;
-  try {
-    const big = (l: string) => {
-      const [h, lo] = l.split('/');
-      if (!h || !lo) throw new Error('invalid LSN');
-      return (BigInt('0x' + h) << 32n) | BigInt('0x' + lo);
-    };
-    return big(a) > big(b);
-  } catch {
-    // Conservative: treat parse failure as "not after" to avoid duplicate delivery.
-    return false;
   }
 }
 
@@ -75,76 +69,40 @@ function lsnAfter(a: string, b: string | null): boolean {
 export class HookCdcService implements OnModuleInit, OnModuleDestroy {
   private readonly logger = new Logger('HookCdc');
   private readonly streams = new Map<string, Stream>();
+  private readonly providers = new Map<DatabaseEngine, CdcProvider>();
 
   constructor(
     private readonly prisma: PrismaService,
     private readonly store: HookStoreService,
     private readonly connStore: ConnectionStoreService,
-    private readonly pool: AdapterPoolService,
     private readonly delivery: DeliveryService,
     private readonly runs: HookRunService,
-  ) {}
+    @Inject(CDC_PROVIDERS) providers: CdcProvider[],
+  ) {
+    for (const p of providers) this.providers.set(p.engine, p);
+  }
+
+  private providerFor(engine: DatabaseEngine): CdcProvider | null {
+    return this.providers.get(engine) ?? null;
+  }
 
   /* ----- readiness (drives the builder's setup panel) ----- */
 
   async readiness(dto: CdcReadinessDTO): Promise<CdcReadiness> {
-    const conn = await this.connStore.get(dto.connectionId);
-    if (conn.engine !== 'postgres') {
+    const conn = await this.connStore.resolve(dto.connectionId);
+    const provider = this.providerFor(conn.engine);
+    if (!provider) {
       return {
         engine: conn.engine,
         supported: false,
         ready: false,
         checks: [],
         instructions: [
-          `Event-based (CDC) delivery is currently available for PostgreSQL only. For ${conn.engine}, use the polling trigger instead.`,
+          `Event-based (CDC) delivery isn't available for ${conn.engine}. Use the polling trigger instead.`,
         ],
       };
     }
-
-    const checks: CdcReadiness['checks'] = [];
-    const instructions: string[] = [];
-    try {
-      const res = await this.pool.withAdapter(dto.connectionId, dto.database, (a) =>
-        a.query(
-          `select current_setting('wal_level') as wal_level,
-                  (select rolreplication or rolsuper from pg_roles where rolname = current_user) as can_replicate`,
-        ),
-      );
-      const row = (res.rows[0] ?? {}) as { wal_level?: string; can_replicate?: boolean };
-      const logical = row.wal_level === 'logical';
-      const canReplicate = row.can_replicate === true;
-      checks.push({
-        label: 'wal_level = logical',
-        ok: logical,
-        detail: row.wal_level ? `currently "${row.wal_level}"` : undefined,
-      });
-      checks.push({ label: 'role can replicate', ok: canReplicate });
-      if (!logical) {
-        instructions.push(
-          'Set wal_level=logical on the server (postgresql.conf or your provider’s parameter group) and restart it. This is the one step we can’t automate — it needs a server restart.',
-        );
-      }
-      if (!canReplicate) {
-        instructions.push(
-          `Grant replication to the connection's role:  ALTER ROLE "${conn.user ?? 'your_user'}" REPLICATION;`,
-        );
-      }
-      return {
-        engine: 'postgres',
-        supported: true,
-        ready: logical && canReplicate,
-        checks,
-        instructions,
-      };
-    } catch (err) {
-      return {
-        engine: 'postgres',
-        supported: true,
-        ready: false,
-        checks: [{ label: 'connect to database', ok: false, detail: (err as Error).message }],
-        instructions: ['Could not query the database to check readiness.'],
-      };
-    }
+    return provider.readiness(dto, conn);
   }
 
   /* ----- start / stop ----- */
@@ -158,30 +116,37 @@ export class HookCdcService implements OnModuleInit, OnModuleDestroy {
       throw new BadRequestError('Event-based hooks must read from a table.');
     }
     const conn = await this.connStore.resolve(hook.source.connectionId);
-    if (conn.engine !== 'postgres') {
-      throw new BadRequestError('Event-based delivery is only available for PostgreSQL.');
+    const provider = this.providerFor(conn.engine);
+    if (!provider) {
+      throw new BadRequestError(
+        `Event-based delivery isn't available for ${conn.engine}. Use the polling trigger instead.`,
+      );
     }
+
     const active = await this.prisma.hookRun.findFirst({
       where: { hookId, status: { in: ['queued', 'running', 'canceling'] } },
     });
     if (active) throw new ConflictError('This hook is already running. Stop it first.');
 
-    const ready = await this.readiness({
-      connectionId: hook.source.connectionId,
-      database: hook.source.database,
-      schema: hook.source.schema,
-      table: hook.source.table,
-    });
+    const ready = await provider.readiness(
+      {
+        connectionId: hook.source.connectionId,
+        database: hook.source.database,
+        schema: hook.source.schema,
+        table: hook.source.table,
+      },
+      conn,
+    );
     if (!ready.ready) {
       throw new BadRequestError(
-        `PostgreSQL isn't ready for event-based delivery. ${ready.instructions.join(' ')}`,
+        `${conn.engine} isn't ready for event-based delivery. ${ready.instructions.join(' ')}`,
       );
     }
 
-    await this.provision(hookId, hook);
+    await provider.provision(hookId, hook, conn);
 
     // One run per hook: resume the existing (paused) run in place rather than
-    // spawning a new one. The slot remembers the LSN, so it continues cleanly.
+    // spawning a new one. Durable engines keep their cursor, so it continues cleanly.
     const latest = await this.prisma.hookRun.findFirst({
       where: { hookId },
       orderBy: { startedAt: 'desc' },
@@ -201,18 +166,15 @@ export class HookCdcService implements OnModuleInit, OnModuleDestroy {
             totalCount: null,
           },
         });
-    await this.beginStream(hookId, hook, conn, run.id, run.cursorOffset, lsnOf(run.cursorJson));
-    this.logger.log(`Streaming changes for hook ${hookId} (run ${run.id})`);
+
+    await this.beginStream(hookId, hook, conn, provider, run.id, run.cursorOffset, readCursor(run.cursorJson));
+    this.logger.log(`Streaming changes for hook ${hookId} (run ${run.id}, ${conn.engine})`);
     return this.runs.getRun(hookId, run.id);
   }
 
-  /** Pause: stop the live stream but keep the slot so a resume continues. */
+  /** Pause: stop the live stream but keep durable state so a resume continues. */
   async stop(hookId: string): Promise<HookRun | null> {
-    const stream = this.streams.get(hookId);
-    if (stream) {
-      await stream.service.stop().catch(() => undefined);
-      this.streams.delete(hookId);
-    }
+    await this.teardown(hookId);
     const run = await this.prisma.hookRun.findFirst({
       where: { hookId, status: { in: ['running', 'queued', 'canceling'] } },
       orderBy: { startedAt: 'desc' },
@@ -222,203 +184,100 @@ export class HookCdcService implements OnModuleInit, OnModuleDestroy {
     return this.runs.getRun(hookId, run.id);
   }
 
-  /** Full teardown when a hook is deleted: stop stream and drop slot + publication. */
+  /** Full teardown when a hook is deleted: stop stream and drop provider state. */
   async cleanup(hookId: string): Promise<void> {
-    const stream = this.streams.get(hookId);
-    if (stream) {
-      await stream.service.stop().catch(() => undefined);
-      this.streams.delete(hookId);
+    await this.teardown(hookId);
+    try {
+      const hook = await this.store.resolve(hookId);
+      if (hook.source.kind !== 'table') return;
+      const conn = await this.connStore.resolve(hook.source.connectionId);
+      const provider = this.providerFor(conn.engine);
+      await provider?.deprovision(hookId, hook, conn).catch(() => undefined);
+    } catch {
+      /* hook/connection already gone — nothing to deprovision */
     }
-    await this.deprovision(hookId).catch(() => undefined);
   }
 
-  /** Close every replication connection on shutdown — no zombie streamers. */
+  /** Close every streaming connection on shutdown — no zombie streamers. */
   async onModuleDestroy(): Promise<void> {
-    for (const stream of this.streams.values()) {
-      await stream.service.stop().catch(() => undefined);
+    for (const hookId of [...this.streams.keys()]) {
+      await this.teardown(hookId);
     }
-    this.streams.clear();
   }
 
-  /* ----- the stream ----- */
+  private async teardown(hookId: string): Promise<void> {
+    const stream = this.streams.get(hookId);
+    if (!stream) return;
+    this.streams.delete(hookId);
+    await stream.handle.stop().catch(() => undefined);
+  }
+
+  /* ----- the shared change pipeline ----- */
 
   private async beginStream(
     hookId: string,
     hook: ResolvedHook,
     conn: ConnectionConfig,
+    provider: CdcProvider,
     runId: string,
     startSeq: number,
-    startLsn: string | null,
+    startCursor: string | null,
   ): Promise<void> {
-    if (hook.source.kind !== 'table' || hook.trigger.kind !== 'cdc') return;
-    const src = hook.source;
-    const ops = new Set<CdcOperation>(hook.trigger.operations);
-    const schema = src.schema || 'public';
-
-    const service = new LogicalReplicationService(this.clientConfig(conn, src.database), {
-      acknowledge: { auto: true, timeoutSeconds: 10 },
-      flowControl: { enabled: true }, // backpressure: await each delivery
-    });
-    const stream: Stream = { service, runId, seq: startSeq, lastLsn: startLsn };
+    const stream: Stream = { handle: { stop: async () => undefined }, provider, runId, seq: startSeq, watermark: startCursor };
     this.streams.set(hookId, stream);
 
-    service.on('data', async (lsn: string, msg: { tag: string; relation?: { name: string; schema: string }; new?: Record<string, unknown>; old?: Record<string, unknown>; key?: Record<string, unknown> }) => {
-      if (msg.tag !== 'insert' && msg.tag !== 'update' && msg.tag !== 'delete') return;
-      if (!ops.has(msg.tag as CdcOperation)) return;
-      if (!msg.relation || msg.relation.name !== src.table || msg.relation.schema !== schema) {
-        return;
-      }
-      // Strict exactly-once: never re-process a WAL position we've already done
-      // (Postgres replays from the last *acked* LSN after a reconnect).
-      if (!lsnAfter(lsn, stream.lastLsn)) return;
-      const row =
-        msg.tag === 'delete' ? (msg.old ?? msg.key ?? {}) : (msg.new ?? {});
-      await this.deliverChange(hook, stream, row, msg.tag as CdcOperation, lsn);
+    const handle = await provider.startStream({
+      hookId,
+      hook,
+      conn,
+      fromCursor: startCursor,
+      handlers: {
+        onChange: (change) => this.handleChange(hookId, hook, change),
+        onError: (err) => this.logger.warn(`CDC stream error for ${hookId}: ${err.message}`),
+      },
     });
-
-    service.on('error', (err: Error) => {
-      this.logger.warn(`CDC stream error for ${hookId}: ${err.message}`);
-    });
-
-    const plugin = new PgoutputPlugin({
-      protoVersion: 1,
-      publicationNames: [this.pubName(hookId)],
-    });
-    // Resumes from the slot's confirmed LSN automatically.
-    service.subscribe(plugin, this.slotName(hookId)).catch((err: Error) => {
-      this.logger.warn(`CDC subscribe failed for ${hookId}: ${err.message}`);
-    });
+    // The provider may have already begun emitting; only replace the placeholder.
+    stream.handle = handle;
   }
 
-  private async deliverChange(
+  /** Dedupe → render → deliver → record → persist cursor, for one change. */
+  private async handleChange(
+    hookId: string,
     hook: ResolvedHook,
-    stream: Stream,
-    row: Record<string, unknown>,
-    op: CdcOperation,
-    lsn: string,
+    change: CdcChange,
   ): Promise<void> {
-    if (hook.source.kind !== 'table') return;
+    const stream = this.streams.get(hookId);
+    if (!stream || hook.source.kind !== 'table') return;
+    // Strict exactly-once: never re-process a position we've already done
+    // (durable engines replay from the last acked cursor after a reconnect).
+    if (!stream.provider.cursorAfter(change.cursor, stream.watermark)) return;
+
     const seq = stream.seq;
     const now = new Date().toISOString();
     // Expose the change operation to the template as {{$op}}.
-    const { body } = renderRow({ ...row, $op: op }, hook.transform, {
+    const { body } = renderRow({ ...change.row, $op: change.op as CdcOperation }, hook.transform, {
       table: hook.source.table,
       now,
       index: seq,
     });
-    // Key on the LSN (stable per WAL change) so an at-least-once re-delivery
-    // after a reconnect carries the SAME Idempotency-Key for the receiver to
-    // dedupe — unlike the sequence, which changes on replay.
-    const idem = hook.destination.idempotency ? `${stream.runId}:${lsn}` : undefined;
+    // Key on the cursor (stable per change) so an at-least-once re-delivery after
+    // a reconnect carries the SAME Idempotency-Key for the receiver to dedupe.
+    const idem = hook.destination.idempotency ? `${stream.runId}:${change.cursor}` : undefined;
     const signal = new AbortController().signal;
-    const outcome = await this.delivery.send(
-      body,
-      hook.destination,
-      hook.delivery,
-      signal,
-      idem,
-    );
-    const pkVals = Object.values(row);
+    const outcome = await this.delivery.send(body, hook.destination, hook.delivery, signal, idem);
+
+    const pkVals = Object.values(change.row);
     await this.runs.recordDelivery(
       stream.runId,
       { sequence: seq, rowIndex: seq, rowCount: 1, rowKeys: pkVals.length ? pkVals : null },
       outcome,
     );
     stream.seq = seq + 1;
-    stream.lastLsn = lsn; // advance the dedupe watermark (durably persisted below)
+    stream.watermark = change.cursor;
     await this.prisma.hookRun.update({
       where: { id: stream.runId },
-      data: { cursorOffset: stream.seq, cursorJson: JSON.stringify({ lsn }) },
+      data: { cursorOffset: stream.seq, cursorJson: JSON.stringify({ cursor: change.cursor }) },
     });
-  }
-
-  /* ----- provisioning ----- */
-
-  private pubName(hookId: string): string {
-    return `relay_pub_${hookId.replace(/-/g, '')}`;
-  }
-  private slotName(hookId: string): string {
-    return `relay_slot_${hookId.replace(/-/g, '')}`;
-  }
-  private quoteIdent(id: string): string {
-    return `"${id.replace(/"/g, '""')}"`;
-  }
-
-  private async provision(hookId: string, hook: ResolvedHook): Promise<void> {
-    if (hook.source.kind !== 'table') return;
-    const src = hook.source;
-    const schema = src.schema || 'public';
-    const pub = this.pubName(hookId);
-    const slot = this.slotName(hookId);
-    const target = `${this.quoteIdent(schema)}.${this.quoteIdent(src.table)}`;
-
-    await this.pool.withAdapter(src.connectionId, src.database, async (a) => {
-      // Check if the publication exists and is for the correct table. If the
-      // user edited the hook to change the source table, we must update the
-      // publication — otherwise we'd silently stream the old table's changes.
-      const pubInfo = await a.query(
-        `select pub.pubname, cls.relname as tablename
-         from pg_publication pub
-         join pg_publication_tables pt on pt.pubname = pub.pubname
-         join pg_class cls on cls.relname = pt.tablename
-         where pub.pubname = $1`,
-        [pub],
-      );
-      const existingTable = (pubInfo.rows[0] as { tablename?: string } | undefined)?.tablename;
-      if (pubInfo.rows.length === 0) {
-        await a.query(`CREATE PUBLICATION ${this.quoteIdent(pub)} FOR TABLE ${target}`);
-      } else if (existingTable !== src.table) {
-        // Table changed — update the publication in place so the slot keeps its position.
-        await a.query(
-          `ALTER PUBLICATION ${this.quoteIdent(pub)} SET TABLE ${target}`,
-        );
-        this.logger.log(`Updated CDC publication "${pub}" to target table "${src.table}"`);
-      }
-
-      const hasSlot = await a.query(
-        `select 1 from pg_replication_slots where slot_name = $1`,
-        [slot],
-      );
-      if (hasSlot.rows.length === 0) {
-        await a.query(`select pg_create_logical_replication_slot($1, 'pgoutput')`, [slot]);
-      }
-    });
-  }
-
-  private async deprovision(hookId: string): Promise<void> {
-    const run = await this.prisma.hookRun.findFirst({
-      where: { hookId },
-      orderBy: { startedAt: 'desc' },
-      select: { configSnapshotJson: true },
-    });
-    if (!run) return;
-    const snap = JSON.parse(run.configSnapshotJson) as { source: ResolvedHook['source'] };
-    if (snap.source.kind !== 'table') return;
-    const slot = this.slotName(hookId);
-    const pub = this.pubName(hookId);
-    await this.pool.withAdapter(snap.source.connectionId, snap.source.database, async (a) => {
-      await a
-        .query(
-          `select pg_drop_replication_slot($1) where exists (select 1 from pg_replication_slots where slot_name = $1 and active = false)`,
-          [slot],
-        )
-        .catch(() => undefined);
-      await a.query(`DROP PUBLICATION IF EXISTS ${this.quoteIdent(pub)}`).catch(() => undefined);
-    });
-  }
-
-  private clientConfig(conn: ConnectionConfig, database?: string) {
-    if (conn.connectionString) {
-      return { connectionString: conn.connectionString } as Record<string, unknown>;
-    }
-    return {
-      host: conn.host,
-      port: conn.port,
-      user: conn.user,
-      password: conn.password,
-      database: database || conn.database,
-      ssl: conn.ssl ? { rejectUnauthorized: false } : undefined,
-    } as Record<string, unknown>;
   }
 
   /* ----- boot recovery ----- */
@@ -426,7 +285,6 @@ export class HookCdcService implements OnModuleInit, OnModuleDestroy {
   async onModuleInit(): Promise<void> {
     let runs: { hookId: string; id: string; cursorOffset: number; cursorJson: string | null }[];
     try {
-      // All live runs; we keep only the ones whose hook is a CDC hook below.
       runs = await this.prisma.hookRun.findMany({
         where: { status: 'running' },
         select: { hookId: true, id: true, cursorOffset: true, cursorJson: true },
@@ -439,9 +297,11 @@ export class HookCdcService implements OnModuleInit, OnModuleDestroy {
         const hook = await this.store.resolve(r.hookId);
         if (hook.trigger.kind !== 'cdc' || !hook.enabled || hook.source.kind !== 'table') continue;
         const conn = await this.connStore.resolve(hook.source.connectionId);
-        if (conn.engine !== 'postgres') continue;
-        await this.beginStream(r.hookId, hook, conn, r.id, r.cursorOffset, lsnOf(r.cursorJson));
-        this.logger.log(`Resumed CDC stream for hook ${r.hookId}`);
+        const provider = this.providerFor(conn.engine);
+        if (!provider) continue;
+        await provider.provision(r.hookId, hook, conn).catch(() => undefined);
+        await this.beginStream(r.hookId, hook, conn, provider, r.id, r.cursorOffset, readCursor(r.cursorJson));
+        this.logger.log(`Resumed CDC stream for hook ${r.hookId} (${conn.engine})`);
       } catch (err) {
         this.logger.warn(`Could not resume CDC ${r.hookId}: ${(err as Error).message}`);
       }
