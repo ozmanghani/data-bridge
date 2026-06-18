@@ -17,10 +17,10 @@
     "node": ">=22"
   },
   "scripts": {
-    "dev": "node scripts/setup-env.mjs && pnpm --filter @data-bridge/core build && node scripts/banner.mjs dev && concurrently -n api,web -c magenta,cyan \"pnpm --filter @data-bridge/api dev\" \"pnpm --filter @data-bridge/web dev\"",
+    "dev": "node scripts/setup-env.mjs && pnpm --filter @data-bridge/core build && concurrently -n api,web -c magenta,cyan \"pnpm --filter @data-bridge/api dev\" \"pnpm --filter @data-bridge/web dev\"",
     "dev:api": "pnpm --filter @data-bridge/api dev",
     "dev:web": "pnpm --filter @data-bridge/web dev",
-    "start": "node scripts/setup-env.mjs && pnpm build && node scripts/banner.mjs prod && concurrently -n api,web -c magenta,cyan \"pnpm --filter @data-bridge/api start\" \"pnpm --filter @data-bridge/web start\"",
+    "start": "node scripts/setup-env.mjs && pnpm build && concurrently -n api,web -c magenta,cyan \"pnpm --filter @data-bridge/api start\" \"pnpm --filter @data-bridge/web start\"",
     "build": "pnpm --filter @data-bridge/core build && pnpm --filter @data-bridge/api build && pnpm --filter @data-bridge/web build",
     "build:core": "pnpm --filter @data-bridge/core build",
     "migrate": "pnpm --filter @data-bridge/api migrate:deploy",

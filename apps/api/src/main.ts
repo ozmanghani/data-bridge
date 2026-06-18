@@ -20,8 +20,16 @@ async function bootstrap(): Promise<void> {
   app.enableShutdownHooks();
 
   await app.listen(runtimeConfig.port);
-  // console.log so this single line always prints regardless of log level
-  console.log(`\n API ready  →  http://localhost:${runtimeConfig.port}/api\n`);
+
+  // this is the last thing to print after a `pnpm dev/start`, so show both
+  // URLs here, the web one first since that's the one you actually open. the
+  // plain console.log so it always shows regardless of the nest log level
+  const webPort = process.env.WEB_PORT ?? '3002';
+  console.log(
+    `\n  Data Bridge · ready\n\n` +
+      `    Web  http://localhost:${webPort}   ← open this\n` +
+      `    API  http://localhost:${runtimeConfig.port}/api\n`,
+  );
 }
 
 void bootstrap();
