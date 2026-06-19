@@ -61,6 +61,8 @@ export interface AdapterCapabilities {
 export interface ConnectionConfig {
   id: string;
   name: string;
+  /** the workspace this connection belongs to */
+  workspaceId: string;
   engine: DatabaseEngine;
   /** optional accent color for the UI (hex) */
   color?: string;
@@ -80,11 +82,14 @@ export interface ConnectionConfig {
   updatedAt: string;
 }
 
-/** a connection without the assigned id / timestamps (creation payload) */
+/**
+ * a connection without the assigned id / timestamps (creation payload).
+ * workspaceId is optional here — the server falls back to the default workspace.
+ */
 export type ConnectionInput = Omit<
   ConnectionConfig,
-  'id' | 'createdAt' | 'updatedAt'
->;
+  'id' | 'createdAt' | 'updatedAt' | 'workspaceId'
+> & { workspaceId?: string };
 
 /* -------------------------------------------------------------------------- */
 /* schema introspection                                                       */

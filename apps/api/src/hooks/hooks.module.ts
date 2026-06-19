@@ -52,5 +52,7 @@ import { SqliteCdcProvider } from './cdc/providers/sqlite-cdc.provider';
       useFactory: (...providers: CdcProvider[]): CdcProvider[] => providers,
     },
   ],
+  // exported so WorkspacesModule can stop a workspace's live bridges on delete
+  exports: [HookStoreService, HookWatchService, HookCdcService],
 })
 export class HooksModule {}

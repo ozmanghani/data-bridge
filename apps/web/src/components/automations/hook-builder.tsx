@@ -107,7 +107,7 @@ function formatCell(value: unknown): string {
 }
 
 export function HookBuilder() {
-  const { hookEditor, closeHookEditor, selectHook, openConnectionDialog, automationTab } =
+  const { hookEditor, closeHookEditor, selectHook, openConnectionDialog } =
     useStudio();
   const editing = hookEditor.editingId;
   const create = useCreateHook();
@@ -192,10 +192,10 @@ export function HookBuilder() {
       return;
     }
     reset();
-    // new items belong to the active sidebar tab's environment
-    const kind = automationTab === 'hooks' ? 'hook' : 'job';
-    setBuilderKind(kind);
-    setTriggerKind(kind === 'hook' ? 'watch' : 'replay');
+    // a new bridge runs an on-demand job by default; the user can switch it to a
+    // live hook in the "What runs in this bridge" selector
+    setBuilderKind('job');
+    setTriggerKind('replay');
     if (hookEditor.seed) {
       setConnectionId(hookEditor.seed.connectionId);
       setDatabase(hookEditor.seed.database ?? '');
@@ -515,15 +515,15 @@ export function HookBuilder() {
       const input = buildInput();
       if (editing) {
         await update.mutateAsync({ id: editing, input });
-        toast.success('Hook updated');
+        toast.success('Bridge updated');
       } else {
         const hook = await create.mutateAsync(input);
         selectHook(hook.id);
-        toast.success('Hook created');
+        toast.success('Bridge created');
       }
       closeHookEditor();
     } catch (err) {
-      toast.error('Could not save hook', {
+      toast.error('Could not save bridge', {
         description: err instanceof ApiError ? err.message : String(err),
       });
     }
@@ -540,7 +540,7 @@ export function HookBuilder() {
         <Input
           value={name}
           onChange={(e) => setName(e.target.value)}
-          placeholder="Hook name"
+          placeholder="Bridge name"
           className="h-8 max-w-xs font-medium"
         />
         <div className="text-muted-foreground ml-2 text-sm">
@@ -569,7 +569,7 @@ export function HookBuilder() {
           </Button>
           <Button onClick={handleSave} disabled={!canSave || saving}>
             {saving && <Loader2 className="mr-2 h-4 w-4 animate-spin" />}
-            {editing ? 'Save hook' : 'Create hook'}
+            {editing ? 'Save bridge' : 'Create bridge'}
           </Button>
         </div>
       </div>
@@ -903,6 +903,40 @@ export function HookBuilder() {
         <ResizablePanel defaultSize={36} minSize={26}>
           <div className="h-full overflow-y-auto">
             <div className="space-y-5 p-4">
+              {/* what runs in this bridge: an on-demand job or a live hook */}
+              <section className="space-y-2">
+                <h3 className="text-sm font-semibold">What runs in this bridge</h3>
+                <div className="flex overflow-hidden rounded-md border text-xs">
+                  {(
+                    [
+                      ['job', 'Job · on-demand'],
+                      ['hook', 'Hook · live'],
+                    ] as const
+                  ).map(([k, label]) => (
+                    <button
+                      key={k}
+                      onClick={() => {
+                        setBuilderKind(k);
+                        setTriggerKind(k === 'hook' ? 'watch' : 'replay');
+                      }}
+                      className={cn(
+                        'flex-1 px-2.5 py-1.5 transition-colors',
+                        builderKind === k
+                          ? 'bg-accent font-medium'
+                          : 'text-muted-foreground hover:bg-accent/50',
+                      )}
+                    >
+                      {label}
+                    </button>
+                  ))}
+                </div>
+                <p className="text-muted-foreground text-[11px]">
+                  {builderKind === 'job'
+                    ? 'Streams rows once when you press Run — good for backfills.'
+                    : 'Listens and delivers changes the moment they happen.'}
+                </p>
+              </section>
+
               {/* trigger, hooks only. jobs are always a one-shot replay */}
               {builderKind === 'hook' && (
                 <section className="space-y-2">

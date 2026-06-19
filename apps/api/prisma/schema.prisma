@@ -13,9 +13,29 @@ datasource db {
   url      = env("DATABASE_URL")
 }
 
+// ─────────────────────────────────────────────────────────────────────────────
+//  Workspace — the top-level container. Owns connections and hooks (bridges).
+//  Every install has a default workspace so the concept stays invisible until
+//  someone wants a second one.
+// ─────────────────────────────────────────────────────────────────────────────
+
+model Workspace {
+  id        String   @id
+  name      String
+  color     String?
+  createdAt DateTime @default(now()) @map("created_at")
+  updatedAt DateTime @updatedAt @map("updated_at")
+
+  connections Connection[]
+  hooks       Hook[]
+
+  @@map("workspaces")
+}
+
 model Connection {
   id                  String   @id
   name                String
+  workspaceId         String   @map("workspace_id")
   engine              String
   color               String?
   host                String?
@@ -29,6 +49,9 @@ model Connection {
   createdAt           DateTime @default(now()) @map("created_at")
   updatedAt           DateTime @updatedAt @map("updated_at")
 
+  workspace Workspace @relation(fields: [workspaceId], references: [id], onDelete: Cascade)
+
+  @@index([workspaceId])
   @@map("connections")
 }
 
@@ -45,6 +68,7 @@ model Connection {
 model Hook {
   id              String   @id
   name            String
+  workspaceId     String   @map("workspace_id")
   connectionId    String   @map("connection_id")
   sourceJson      String   @map("source_json")
   destinationJson String   @map("destination_json") // auth secret stripped
@@ -56,9 +80,11 @@ model Hook {
   createdAt       DateTime @default(now()) @map("created_at")
   updatedAt       DateTime @updatedAt @map("updated_at")
 
-  runs HookRun[]
+  runs      HookRun[]
+  workspace Workspace @relation(fields: [workspaceId], references: [id], onDelete: Cascade)
 
   @@index([connectionId])
+  @@index([workspaceId])
   @@map("hooks")
 }
 

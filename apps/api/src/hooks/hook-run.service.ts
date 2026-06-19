@@ -353,6 +353,26 @@ export class HookRunService implements OnModuleInit {
     return rows.map((r) => this.toRun(r));
   }
 
+  /**
+   * latest run status for every bridge in a workspace, in one query — feeds the
+   * workspace map so its edges can show live/failed/idle without N requests.
+   */
+  async workspaceStatuses(
+    workspaceId: string,
+  ): Promise<{ hookId: string; active: boolean; lastStatus: HookRunStatus }[]> {
+    const latest = await this.prisma.hookRun.findMany({
+      where: { hook: { workspaceId } },
+      orderBy: { startedAt: 'desc' },
+      distinct: ['hookId'],
+      select: { hookId: true, status: true },
+    });
+    return latest.map((r) => ({
+      hookId: r.hookId,
+      active: ACTIVE.includes(r.status as HookRunStatus),
+      lastStatus: r.status as HookRunStatus,
+    }));
+  }
+
   async getRun(hookId: string, runId: string): Promise<HookRun> {
     const row = await this.getRunRow(runId);
     if (row.hookId !== hookId)

@@ -135,6 +135,8 @@ export const hookTriggerSchema = z.discriminatedUnion('kind', [
 
 export const hookInputSchema = z.object({
   name: z.string().min(1, 'Name is required').max(120),
+  // which workspace this bridge lives in; server defaults it when omitted
+  workspaceId: z.string().optional(),
   source: hookSourceSchema,
   destination: hookDestinationSchema,
   transform: hookTransformSchema,
@@ -219,6 +221,8 @@ export type DeliveryStatus = 'success' | 'failed' | 'skipped';
 export interface Hook {
   id: string;
   name: string;
+  /** the workspace this bridge belongs to */
+  workspaceId: string;
   source: HookSource;
   destination: HookDestination;
   transform: HookTransformConfig;
