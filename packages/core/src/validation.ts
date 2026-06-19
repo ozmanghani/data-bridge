@@ -12,6 +12,8 @@ export const engineSchema = z.enum([
 
 export const connectionInputSchema = z.object({
   name: z.string().min(1, 'Name is required').max(120),
+  // which workspace this connection lives in; server defaults it when omitted
+  workspaceId: z.string().optional(),
   engine: engineSchema,
   color: z.string().optional(),
   host: z.string().optional(),

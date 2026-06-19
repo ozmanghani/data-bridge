@@ -5,9 +5,6 @@ import type { RelationKind } from '@data-bridge/core';
 
 export type StudioTab = 'data' | 'query' | 'structure' | 'diagram';
 
-/** sidebar grouping: live "Hooks" (watch trigger) vs on-demand "Jobs" (replay) */
-export type AutomationTab = 'hooks' | 'jobs';
-
 export interface SelectedRelation {
   schema?: string;
   table: string;
@@ -37,6 +34,9 @@ function freshTabs(): { tabs: QueryTab[]; activeId: string } {
 }
 
 interface StudioState {
+  /** the workspace currently in view; everything is scoped to it */
+  activeWorkspaceId: string | null;
+
   activeConnectionId: string | null;
   activeDatabase?: string;
   selected: SelectedRelation | null;
@@ -45,8 +45,7 @@ interface StudioState {
   /** connection editor dialog state */
   dialog: { open: boolean; editingId: string | null };
 
-  /** hooks surface: which sidebar group is active + the selected hook */
-  automationTab: AutomationTab;
+  /** the bridge (hook) currently open in the main panel */
   selectedHookId: string | null;
   /** hook editor dialog: open + which hook (null = new) + optional prefill */
   hookEditor: {
@@ -61,12 +60,12 @@ interface StudioState {
   queryTabs: QueryTab[];
   activeQueryTabId: string;
 
+  setActiveWorkspace: (id: string | null) => void;
   setActiveConnection: (id: string | null) => void;
   setActiveDatabase: (db?: string) => void;
   selectRelation: (rel: SelectedRelation) => void;
   setTab: (tab: StudioTab) => void;
 
-  setAutomationTab: (tab: AutomationTab) => void;
   selectHook: (id: string | null) => void;
   openHookEditor: (opts?: {
     editingId?: string | null;
@@ -90,21 +89,20 @@ interface StudioState {
 const initial = freshTabs();
 
 export const useStudio = create<StudioState>((set) => ({
+  activeWorkspaceId: null,
   activeConnectionId: null,
   activeDatabase: undefined,
   selected: null,
   tab: 'data',
   dialog: { open: false, editingId: null },
-  automationTab: 'hooks',
   selectedHookId: null,
   hookEditor: { open: false, editingId: null, seed: null },
   dataSourcesOpen: false,
   queryTabs: initial.tabs,
   activeQueryTabId: initial.activeId,
 
-  // selecting a hook and browsing a table are mutually exclusive. the main
-  // view shows the table preview when one is picked, else the hooks workspace
-  setAutomationTab: (tab) => set({ automationTab: tab }),
+  // selecting a bridge and browsing a table are mutually exclusive. the main
+  // view shows the table preview when one is picked, else the workspace map
   selectHook: (id) => set({ selectedHookId: id, selected: null }),
   openHookEditor: (opts) =>
     set({
@@ -118,6 +116,10 @@ export const useStudio = create<StudioState>((set) => ({
     set({ hookEditor: { open: false, editingId: null, seed: null } }),
   openDataSources: () => set({ dataSourcesOpen: true }),
   closeDataSources: () => set({ dataSourcesOpen: false }),
+
+  // switching workspace drops the selected bridge (it lives in another one)
+  setActiveWorkspace: (id) =>
+    set({ activeWorkspaceId: id, selectedHookId: null, selected: null }),
 
   setActiveConnection: (id) => {
     const f = freshTabs();

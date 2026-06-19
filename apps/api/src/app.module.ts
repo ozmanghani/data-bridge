@@ -5,6 +5,7 @@ import { redisConnectionOptions } from './common/runtime-config';
 import { ConnectionsModule } from './connections/connections.module';
 import { DriversModule } from './drivers/drivers.module';
 import { HooksModule } from './hooks/hooks.module';
+import { WorkspacesModule } from './workspaces/workspaces.module';
 
 @Module({
   imports: [
@@ -13,6 +14,7 @@ import { HooksModule } from './hooks/hooks.module';
     ConnectionsModule,
     DriversModule,
     HooksModule,
+    WorkspacesModule,
   ],
 })
 export class AppModule {}

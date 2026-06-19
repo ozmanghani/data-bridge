@@ -22,6 +22,8 @@ import type {
   InsertRowParams,
   QueryResult,
   UpdateRowParams,
+  Workspace,
+  WorkspaceInputDTO,
 } from '@data-bridge/core';
 
 const BASE_URL =
@@ -78,7 +80,19 @@ function jsonBody(value: unknown): RequestInit {
 export const api = {
   listDrivers: () => request<DriverInfo[]>('/drivers'),
 
-  listConnections: () => request<ConnectionConfig[]>('/connections'),
+  /* ----- workspaces ----- */
+  listWorkspaces: () => request<Workspace[]>('/workspaces'),
+  createWorkspace: (input: WorkspaceInputDTO) =>
+    request<Workspace>('/workspaces', { method: 'POST', ...jsonBody(input) }),
+  updateWorkspace: (id: string, input: WorkspaceInputDTO) =>
+    request<Workspace>(`/workspaces/${id}`, { method: 'PUT', ...jsonBody(input) }),
+  deleteWorkspace: (id: string) =>
+    request<{ id: string }>(`/workspaces/${id}`, { method: 'DELETE' }),
+
+  listConnections: (workspaceId?: string) =>
+    request<ConnectionConfig[]>(
+      workspaceId ? `/connections?workspaceId=${encodeURIComponent(workspaceId)}` : '/connections',
+    ),
   getConnection: (id: string) =>
     request<ConnectionConfig>(`/connections/${id}`),
   createConnection: (input: ConnectionInputDTO) =>
@@ -193,7 +207,14 @@ export const api = {
 
   /* ----- automation hooks ----- */
 
-  listHooks: () => request<Hook[]>('/hooks'),
+  listHooks: (workspaceId?: string) =>
+    request<Hook[]>(
+      workspaceId ? `/hooks?workspaceId=${encodeURIComponent(workspaceId)}` : '/hooks',
+    ),
+  listHookStatuses: (workspaceId: string) =>
+    request<{ hookId: string; active: boolean; lastStatus: string }[]>(
+      `/hooks/statuses?workspaceId=${encodeURIComponent(workspaceId)}`,
+    ),
   getHook: (id: string) => request<Hook>(`/hooks/${id}`),
   createHook: (input: HookInputDTO) =>
     request<Hook>('/hooks', { method: 'POST', ...jsonBody(input) }),

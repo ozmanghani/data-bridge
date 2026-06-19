@@ -1,7 +1,7 @@
 'use client';
 
 import { useEffect, useState } from 'react';
-import { Pencil, Play, Radio, Square, Trash2, Webhook, Loader2 } from 'lucide-react';
+import { Pencil, Play, Radio, Square, Trash2, Loader2 } from 'lucide-react';
 import { toast } from 'sonner';
 import { ApiError } from '@/lib/api';
 import {
@@ -17,31 +17,16 @@ import { cn } from '@/lib/utils';
 import { useConfirm } from '@/components/confirm';
 import { Button } from '@/components/ui/button';
 import { RunDetail, RunStatusBadge } from './run-detail';
+import { WorkspaceMap } from './workspace-map';
 
 export function AutomationsView() {
-  const { selectedHookId, selectHook, openHookEditor } = useStudio();
+  const { selectedHookId, selectHook } = useStudio();
   const { data: hooks } = useHooks();
   const hook = hooks?.find((h) => h.id === selectedHookId) ?? null;
 
+  // nothing selected → show the workspace map (the ecosystem view)
   if (!hook) {
-    return (
-      <div className="flex h-full flex-col items-center justify-center gap-3 text-center text-muted-foreground">
-        <Webhook className="h-10 w-10 opacity-40" />
-        <div>
-          <p className="text-sm">No hook selected</p>
-          <p className="text-xs">
-            Pick a hook on the left, or{' '}
-            <button
-              className="text-primary hover:underline"
-              onClick={() => openHookEditor()}
-            >
-              create one
-            </button>
-            .
-          </p>
-        </div>
-      </div>
-    );
+    return <WorkspaceMap />;
   }
 
   const destHostname = (() => {
@@ -57,7 +42,9 @@ export function AutomationsView() {
       key={hook.id}
       hookId={hook.id}
       hookName={hook.name}
-      sourceLabel={hook.source.kind === 'table' ? hook.source.table : 'custom query'}
+      sourceLabel={
+        hook.source.kind === 'table' ? hook.source.table : 'custom query'
+      }
       destLabel={`${hook.destination.method} ${destHostname}`}
       endpoint={{ url: hook.destination.url, method: hook.destination.method }}
       isWatch={hook.trigger.kind !== 'replay'}
@@ -146,7 +133,8 @@ function HookPanel({
   async function handleDelete() {
     const ok = await confirm({
       title: `Delete "${hookName}"?`,
-      description: 'This removes the hook and its run history. This cannot be undone.',
+      description:
+        'This removes the bridge and its run history. This cannot be undone.',
       confirmText: 'Delete',
       destructive: true,
     });
@@ -154,7 +142,7 @@ function HookPanel({
     try {
       await del.mutateAsync(hookId);
       onDeleted();
-      toast.success('Hook deleted');
+      toast.success('Bridge deleted');
     } catch (err) {
       toast.error('Could not delete', {
         description: err instanceof ApiError ? err.message : String(err),
@@ -168,7 +156,7 @@ function HookPanel({
       <div className="flex items-start gap-3 border-b px-4 py-3">
         <div className="min-w-0">
           <h2 className="truncate text-base font-semibold">{hookName}</h2>
-          <p className="truncate font-mono text-xs text-muted-foreground">
+          <p className="text-muted-foreground truncate font-mono text-xs">
             {sourceLabel} → {destLabel}
           </p>
         </div>
@@ -189,7 +177,11 @@ function HookPanel({
                 Stop listening
               </Button>
             ) : (
-              <Button size="sm" onClick={handleStartWatch} disabled={startWatch.isPending}>
+              <Button
+                size="sm"
+                onClick={handleStartWatch}
+                disabled={startWatch.isPending}
+              >
                 {startWatch.isPending ? (
                   <Loader2 className="mr-1.5 h-3.5 w-3.5 animate-spin" />
                 ) : (
@@ -217,38 +209,12 @@ function HookPanel({
             Edit
           </Button>
           <Button size="sm" variant="ghost" onClick={handleDelete}>
-            <Trash2 className="h-3.5 w-3.5 text-destructive" />
+            <Trash2 className="text-destructive h-3.5 w-3.5" />
           </Button>
         </div>
       </div>
 
       {/* runs strip */}
-      <div className="flex items-center gap-2 overflow-x-auto border-b px-4 py-2">
-        {(!runs || runs.length === 0) && (
-          <p className="text-xs text-muted-foreground">
-            {isWatch
-              ? 'Not listening yet — press Start listening to stream changes as they happen.'
-              : 'No runs yet — press Run to stream rows to the endpoint.'}
-          </p>
-        )}
-        {runs?.map((run) => (
-          <button
-            key={run.id}
-            onClick={() => setSelectedRunId(run.id)}
-            className={cn(
-              'flex shrink-0 items-center gap-2 rounded-md border px-2.5 py-1 text-xs transition-colors',
-              selectedRunId === run.id
-                ? 'border-primary bg-accent'
-                : 'border-transparent hover:bg-accent/50',
-            )}
-          >
-            <RunStatusBadge status={run.status} />
-            <span className="text-muted-foreground">
-              {new Date(run.startedAt).toLocaleString()}
-            </span>
-          </button>
-        ))}
-      </div>
 
       {/* selected run */}
       <div className="flex min-h-0 flex-1 flex-col">
@@ -260,7 +226,7 @@ function HookPanel({
             isHook={isWatch}
           />
         ) : (
-          <div className="flex h-full items-center justify-center text-sm text-muted-foreground">
+          <div className="text-muted-foreground flex h-full items-center justify-center text-sm">
             Select a run to see its delivery log.
           </div>
         )}

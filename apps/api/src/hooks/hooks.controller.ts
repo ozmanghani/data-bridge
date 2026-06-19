@@ -48,8 +48,15 @@ export class HooksController {
   /* ----- CRUD ----- */
 
   @Get()
-  list(): Promise<Hook[]> {
-    return this.store.list();
+  list(@Query('workspaceId') workspaceId?: string): Promise<Hook[]> {
+    return this.store.list(workspaceId);
+  }
+
+  // latest run status per bridge in a workspace (drives the map edge colors).
+  // declared before ':id' so "statuses" isn't captured as a hook id.
+  @Get('statuses')
+  statuses(@Query('workspaceId') workspaceId: string) {
+    return this.runs.workspaceStatuses(workspaceId);
   }
 
   @Post()

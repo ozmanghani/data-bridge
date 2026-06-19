@@ -16,6 +16,7 @@ import { AutomationsView } from '@/components/automations/automations-view';
 import { HookList } from '@/components/automations/hook-list';
 import { HookBuilder } from '@/components/automations/hook-builder';
 import { DataSourcesManager } from '@/components/data-sources-manager';
+import { WorkspaceSwitcher } from '@/components/workspace/workspace-switcher';
 
 /**
  * the app is a hooks workspace. sidebar lists hooks, main panel shows the
@@ -65,7 +66,6 @@ export function Studio() {
                   <Webhook className="text-primary h-4 w-4" />
                 </span>
                 <span className="font-semibold tracking-tight">Data Bridge</span>
-                <span className="text-muted-foreground text-xs">Hooks</span>
               </div>
               <div className="flex items-center gap-0.5">
                 <Button
@@ -79,6 +79,11 @@ export function Studio() {
                 </Button>
                 <ThemeToggle />
               </div>
+            </div>
+            <Separator />
+            {/* which workspace you're in — scopes the bridges + connections below */}
+            <div className="px-2 py-1.5">
+              <WorkspaceSwitcher />
             </div>
             <Separator />
             <HookList />

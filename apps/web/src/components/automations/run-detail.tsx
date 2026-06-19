@@ -4,7 +4,11 @@ import { Ban, Loader2, Play, RotateCcw } from 'lucide-react';
 import { toast } from 'sonner';
 import type { HookRun, HookRunStatus } from '@data-bridge/core';
 import { ApiError } from '@/lib/api';
-import { useCancelHookRun, useRetryFailed, useStartHookRun } from '@/lib/queries';
+import {
+  useCancelHookRun,
+  useRetryFailed,
+  useStartHookRun,
+} from '@/lib/queries';
 import { cn } from '@/lib/utils';
 import { Button } from '@/components/ui/button';
 import { DeliveryMonitor } from './delivery-log';
@@ -29,16 +33,21 @@ export function RunStatusBadge({ status }: { status: HookRunStatus }) {
         STATUS_STYLES[status],
       )}
     >
-      {(status === 'running' || status === 'queued' || status === 'canceling') && (
-        <Loader2 className="h-3 w-3 animate-spin" />
-      )}
+      {(status === 'running' ||
+        status === 'queued' ||
+        status === 'canceling') && <Loader2 className="h-3 w-3 animate-spin" />}
       {status}
     </span>
   );
 }
 
 const ACTIVE: HookRunStatus[] = ['queued', 'running', 'canceling'];
-const RESUMABLE: HookRunStatus[] = ['failed', 'canceled', 'paused', 'interrupted'];
+const RESUMABLE: HookRunStatus[] = [
+  'failed',
+  'canceled',
+  'paused',
+  'interrupted',
+];
 
 function Stat({
   label,
@@ -89,7 +98,10 @@ export function RunDetail({
   const total = run.totalCount;
   const settled = run.sentCount + run.failedCount + run.skippedCount;
   const pending = total != null ? Math.max(0, total - settled) : null;
-  const pct = total && total > 0 ? Math.min(100, Math.round((settled / total) * 100)) : null;
+  const pct =
+    total && total > 0
+      ? Math.min(100, Math.round((settled / total) * 100))
+      : null;
   const attempted = run.sentCount + run.failedCount;
   const successRate =
     attempted > 0 ? Math.round((run.sentCount / attempted) * 100) : null;
@@ -145,7 +157,12 @@ export function RunDetail({
           {/* cancel/resume are job controls. a hook is started/stopped from the
               panel header above, "resuming" one would re-stream the whole table */}
           {!isHook && isActive && (
-            <Button size="sm" variant="outline" onClick={handleCancel} disabled={cancel.isPending}>
+            <Button
+              size="sm"
+              variant="outline"
+              onClick={handleCancel}
+              disabled={cancel.isPending}
+            >
               {cancel.isPending ? (
                 <Loader2 className="mr-1.5 h-3.5 w-3.5 animate-spin" />
               ) : (
@@ -191,9 +208,21 @@ export function RunDetail({
           delivered/failed/skipped breakdown instead of progress-to-completion */}
       {isHook ? (
         <div className="grid grid-cols-2 gap-2 px-4 py-3 sm:grid-cols-4">
-          <Stat label="Delivered" value={run.sentCount.toLocaleString()} tone="success" />
-          <Stat label="Failed" value={run.failedCount.toLocaleString()} tone="danger" />
-          <Stat label="Skipped" value={run.skippedCount.toLocaleString()} tone="warn" />
+          <Stat
+            label="Delivered"
+            value={run.sentCount.toLocaleString()}
+            tone="success"
+          />
+          <Stat
+            label="Failed"
+            value={run.failedCount.toLocaleString()}
+            tone="danger"
+          />
+          <Stat
+            label="Skipped"
+            value={run.skippedCount.toLocaleString()}
+            tone="warn"
+          />
           <Stat
             label="Success"
             value={successRate != null ? `${successRate}%` : '—'}
@@ -202,10 +231,25 @@ export function RunDetail({
       ) : (
         <>
           <div className="grid grid-cols-3 gap-2 px-4 py-3 sm:grid-cols-6">
-            <Stat label="Total" value={total != null ? total.toLocaleString() : '—'} />
-            <Stat label="Delivered" value={run.sentCount.toLocaleString()} tone="success" />
-            <Stat label="Failed" value={run.failedCount.toLocaleString()} tone="danger" />
-            <Stat label="Skipped" value={run.skippedCount.toLocaleString()} tone="warn" />
+            <Stat
+              label="Total"
+              value={total != null ? total.toLocaleString() : '—'}
+            />
+            <Stat
+              label="Delivered"
+              value={run.sentCount.toLocaleString()}
+              tone="success"
+            />
+            <Stat
+              label="Failed"
+              value={run.failedCount.toLocaleString()}
+              tone="danger"
+            />
+            <Stat
+              label="Skipped"
+              value={run.skippedCount.toLocaleString()}
+              tone="warn"
+            />
             <Stat
               label="Queued"
               value={pending != null ? pending.toLocaleString() : '—'}
@@ -232,7 +276,7 @@ export function RunDetail({
       )}
 
       {run.error && (
-        <p className="border-y bg-destructive/10 text-destructive px-4 py-2 text-xs break-words">
+        <p className="bg-destructive/10 text-destructive break-words border-y px-4 py-2 text-xs">
           {run.error}
         </p>
       )}

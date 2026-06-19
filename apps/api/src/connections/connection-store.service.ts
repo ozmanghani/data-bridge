@@ -9,6 +9,7 @@ import type { Connection as ConnectionRow } from '@prisma/client';
 import {
   type ConnectionConfig,
   type ConnectionInput,
+  DEFAULT_WORKSPACE_ID,
   NotFoundError,
 } from '@data-bridge/core';
 import { CryptoService } from '../common/crypto.service';
@@ -27,6 +28,7 @@ export class ConnectionStoreService {
     return {
       id: row.id,
       name: row.name,
+      workspaceId: row.workspaceId,
       engine: row.engine as ConnectionConfig['engine'],
       color: row.color ?? undefined,
       host: row.host ?? undefined,
@@ -60,8 +62,9 @@ export class ConnectionStoreService {
     return row;
   }
 
-  async list(): Promise<ConnectionConfig[]> {
+  async list(workspaceId?: string): Promise<ConnectionConfig[]> {
     const rows = await this.prisma.connection.findMany({
+      where: workspaceId ? { workspaceId } : undefined,
       orderBy: { name: 'asc' },
     });
     return rows.map((r) => this.toConfig(r, false));
@@ -81,6 +84,7 @@ export class ConnectionStoreService {
       data: {
         id: randomUUID(),
         name: input.name,
+        workspaceId: input.workspaceId ?? DEFAULT_WORKSPACE_ID,
         engine: input.engine,
         color: input.color ?? null,
         host: input.host ?? null,

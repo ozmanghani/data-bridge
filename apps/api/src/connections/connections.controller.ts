@@ -50,8 +50,10 @@ export class ConnectionsController {
   /* ----- CRUD ----- */
 
   @Get()
-  list(): Promise<ConnectionConfig[]> {
-    return this.store.list();
+  list(
+    @Query('workspaceId') workspaceId?: string,
+  ): Promise<ConnectionConfig[]> {
+    return this.store.list(workspaceId);
   }
 
   @Post()
@@ -71,6 +73,8 @@ export class ConnectionsController {
       createdAt: now,
       updatedAt: now,
       ...dto,
+      // a throwaway config just for a connectivity check; workspace is irrelevant
+      workspaceId: dto.workspaceId ?? 'test',
     };
     await this.pool.test(config);
     return { success: true };

@@ -9,9 +9,9 @@ import { Injectable } from '@nestjs/common';
 import type { Hook as HookRow } from '@prisma/client';
 import {
   type Hook,
-  type HookAuth,
   type HookDestination,
   type HookInputDTO,
+  DEFAULT_WORKSPACE_ID,
   NotFoundError,
 } from '@data-bridge/core';
 import { CryptoService } from '../common/crypto.service';
@@ -94,6 +94,7 @@ export class HookStoreService {
     return {
       id: row.id,
       name: row.name,
+      workspaceId: row.workspaceId,
       source: JSON.parse(row.sourceJson),
       destination: this.withSecret(sanitized, secret),
       transform: JSON.parse(row.transformJson),
@@ -115,8 +116,11 @@ export class HookStoreService {
 
   /* ----- CRUD ----- */
 
-  async list(): Promise<Hook[]> {
-    const rows = await this.prisma.hook.findMany({ orderBy: { name: 'asc' } });
+  async list(workspaceId?: string): Promise<Hook[]> {
+    const rows = await this.prisma.hook.findMany({
+      where: workspaceId ? { workspaceId } : undefined,
+      orderBy: { name: 'asc' },
+    });
     return rows.map((r) => this.toHook(r, false));
   }
 
@@ -136,6 +140,7 @@ export class HookStoreService {
       data: {
         id: randomUUID(),
         name: input.name,
+        workspaceId: input.workspaceId ?? DEFAULT_WORKSPACE_ID,
         connectionId: input.source.connectionId,
         sourceJson: JSON.stringify(input.source),
         destinationJson: JSON.stringify(sanitized),

@@ -1,0 +1,256 @@
+'use client';
+
+import { useMemo } from 'react';
+import {
+  Background,
+  Controls,
+  Handle,
+  Position,
+  ReactFlow,
+  type Edge,
+  type Node,
+  type NodeProps,
+} from '@xyflow/react';
+import '@xyflow/react/dist/style.css';
+import { Database, Globe, Radio, Zap, Plus, Network } from 'lucide-react';
+import type { ConnectionConfig, Hook } from '@data-bridge/core';
+import { useConnections, useHooks, useHookStatuses } from '@/lib/queries';
+import { useStudio } from '@/lib/store';
+import { cn } from '@/lib/utils';
+import { Button } from '@/components/ui/button';
+
+/** a bridge's live status, derived from its latest run */
+type BridgeStatus = 'active' | 'failed' | 'idle' | 'disabled';
+
+const STATUS_STROKE: Record<BridgeStatus, string> = {
+  active: '#10b981', // emerald — listening/running
+  failed: '#ef4444', // red — last run failed
+  idle: '#94a3b8', // slate — enabled but not running
+  disabled: '#cbd5e1', // faint — disabled
+};
+
+const STATUS_DOT: Record<BridgeStatus, string> = {
+  active: 'bg-emerald-500',
+  failed: 'bg-red-500',
+  idle: 'bg-muted-foreground/50',
+  disabled: 'bg-muted-foreground/30',
+};
+
+/**
+ * the workspace map — a Packet-Tracer-ish picture of the whole workspace.
+ * source databases on the left, bridges in the middle, destination endpoints on
+ * the right, wired together. click a bridge to open it.
+ */
+
+type ConnNodeData = { label: string; engine: string };
+type BridgeNodeData = {
+  hookId: string;
+  label: string;
+  kind: Hook['trigger']['kind'];
+  status: BridgeStatus;
+  selected: boolean;
+};
+type DestNodeData = { host: string };
+
+function ConnectionNode({ data }: NodeProps<Node<ConnNodeData>>) {
+  return (
+    <div className="bg-card flex min-w-[150px] items-center gap-2 rounded-md border px-3 py-2 shadow-sm">
+      <Database className="text-primary h-4 w-4 shrink-0" />
+      <div className="min-w-0">
+        <div className="truncate text-xs font-semibold">{data.label}</div>
+        <div className="text-muted-foreground text-[10px] uppercase">{data.engine}</div>
+      </div>
+      <Handle type="source" position={Position.Right} className="!bg-primary" />
+    </div>
+  );
+}
+
+function BridgeNode({ data }: NodeProps<Node<BridgeNodeData>>) {
+  const Icon = data.kind === 'replay' ? Zap : Radio;
+  return (
+    <div
+      className={cn(
+        'bg-card min-w-[170px] cursor-pointer rounded-md border px-3 py-2 shadow-sm transition-shadow hover:shadow-md',
+        data.selected ? 'ring-primary ring-2' : '',
+      )}
+    >
+      <Handle type="target" position={Position.Left} className="!bg-primary" />
+      <div className="flex items-center gap-2">
+        <span
+          className={cn(
+            'h-1.5 w-1.5 shrink-0 rounded-full',
+            STATUS_DOT[data.status],
+            data.status === 'active' && 'animate-pulse',
+          )}
+        />
+        <span className="truncate text-xs font-semibold">{data.label}</span>
+      </div>
+      <div className="text-muted-foreground mt-1 flex items-center gap-1 text-[10px]">
+        <Icon className="h-3 w-3" />
+        {data.kind === 'replay' ? 'on-demand' : data.kind === 'cdc' ? 'CDC' : 'watch'}
+      </div>
+      <Handle type="source" position={Position.Right} className="!bg-primary" />
+    </div>
+  );
+}
+
+function DestinationNode({ data }: NodeProps<Node<DestNodeData>>) {
+  return (
+    <div className="bg-card flex min-w-[150px] items-center gap-2 rounded-md border px-3 py-2 shadow-sm">
+      <Handle type="target" position={Position.Left} className="!bg-primary" />
+      <Globe className="h-4 w-4 shrink-0 text-sky-500" />
+      <span className="truncate text-xs font-medium">{data.host}</span>
+    </div>
+  );
+}
+
+const nodeTypes = {
+  connection: ConnectionNode,
+  bridge: BridgeNode,
+  destination: DestinationNode,
+};
+
+function hostOf(url: string): string {
+  try {
+    return new URL(url).hostname;
+  } catch {
+    return url;
+  }
+}
+
+function buildGraph(
+  hooks: Hook[],
+  connections: ConnectionConfig[],
+  selectedHookId: string | null,
+  statusOf: (hookId: string) => BridgeStatus,
+): { nodes: Node[]; edges: Edge[] } {
+  const nodes: Node[] = [];
+  const edges: Edge[] = [];
+  const ROW = 110;
+
+  // left column: only connections actually used by a bridge here
+  const usedConnIds = [...new Set(hooks.map((h) => h.source.connectionId))];
+  const connName = new Map(connections.map((c) => [c.id, c]));
+  usedConnIds.forEach((id, i) => {
+    const c = connName.get(id);
+    nodes.push({
+      id: `conn-${id}`,
+      type: 'connection',
+      position: { x: 0, y: i * ROW },
+      data: { label: c?.name ?? 'connection', engine: c?.engine ?? '' },
+    });
+  });
+
+  // right column: unique destination hosts
+  const hosts = [...new Set(hooks.map((h) => hostOf(h.destination.url)))];
+  hosts.forEach((host, i) => {
+    nodes.push({
+      id: `dest-${host}`,
+      type: 'destination',
+      position: { x: 620, y: i * ROW },
+      data: { host },
+    });
+  });
+
+  // middle column: the bridges, wired source -> bridge -> destination
+  hooks.forEach((h, i) => {
+    const status = statusOf(h.id);
+    nodes.push({
+      id: `bridge-${h.id}`,
+      type: 'bridge',
+      position: { x: 310, y: i * ROW },
+      data: {
+        hookId: h.id,
+        label: h.name,
+        kind: h.trigger.kind,
+        status,
+        selected: h.id === selectedHookId,
+      },
+    });
+    // line color + flow animation follow the bridge's live status
+    const animated = status === 'active';
+    const style = { stroke: STATUS_STROKE[status], strokeWidth: status === 'active' ? 2 : 1.5 };
+    edges.push({
+      id: `e-conn-${h.id}`,
+      source: `conn-${h.source.connectionId}`,
+      target: `bridge-${h.id}`,
+      animated,
+      style,
+    });
+    edges.push({
+      id: `e-dest-${h.id}`,
+      source: `bridge-${h.id}`,
+      target: `dest-${hostOf(h.destination.url)}`,
+      animated,
+      style,
+    });
+  });
+
+  return { nodes, edges };
+}
+
+export function WorkspaceMap() {
+  const { data: hooks } = useHooks();
+  const { data: connections } = useConnections();
+  const { data: statuses } = useHookStatuses();
+  const { selectedHookId, selectHook, openHookEditor } = useStudio();
+
+  const { nodes, edges } = useMemo(() => {
+    const byId = new Map((statuses ?? []).map((s) => [s.hookId, s]));
+    const statusOf = (id: string): BridgeStatus => {
+      const hook = (hooks ?? []).find((h) => h.id === id);
+      if (hook && !hook.enabled) return 'disabled';
+      const s = byId.get(id);
+      if (!s) return 'idle';
+      if (s.active) return 'active';
+      if (s.lastStatus === 'failed') return 'failed';
+      return 'idle';
+    };
+    return buildGraph(hooks ?? [], connections ?? [], selectedHookId, statusOf);
+  }, [hooks, connections, statuses, selectedHookId]);
+
+  if ((hooks?.length ?? 0) === 0) {
+    return (
+      <div className="text-muted-foreground flex h-full flex-col items-center justify-center gap-3 text-center">
+        <Network className="h-10 w-10 opacity-40" />
+        <div>
+          <p className="text-sm">No bridges in this workspace yet</p>
+          <p className="text-xs">
+            A bridge moves data from a database to an endpoint.{' '}
+            <button
+              className="text-primary hover:underline"
+              onClick={() => openHookEditor()}
+            >
+              Create one
+            </button>
+            .
+          </p>
+        </div>
+        <Button size="sm" variant="outline" onClick={() => openHookEditor()}>
+          <Plus className="mr-1.5 h-3.5 w-3.5" />
+          New bridge
+        </Button>
+      </div>
+    );
+  }
+
+  return (
+    <div className="h-full w-full">
+      <ReactFlow
+        nodes={nodes}
+        edges={edges}
+        nodeTypes={nodeTypes}
+        fitView
+        proOptions={{ hideAttribution: true }}
+        minZoom={0.2}
+        onNodeClick={(_e, node) => {
+          const data = node.data as Partial<BridgeNodeData>;
+          if (node.type === 'bridge' && data.hookId) selectHook(data.hookId);
+        }}
+      >
+        <Background />
+        <Controls />
+      </ReactFlow>
+    </div>
+  );
+}
