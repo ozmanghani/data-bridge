@@ -22,7 +22,7 @@
     "test": "vitest run"
   },
   "dependencies": {
-    "better-sqlite3": "^11.5.0",
+    "better-sqlite3": "^12.11.1",
     "ioredis": "^5.4.1",
     "mongodb": "^6.10.0",
     "mysql2": "^3.11.4",

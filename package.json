@@ -16,6 +16,16 @@
   "engines": {
     "node": ">=22"
   },
+  "packageManager": "pnpm@10.33.0",
+  "pnpm": {
+    "onlyBuiltDependencies": [
+      "better-sqlite3",
+      "@prisma/client",
+      "@prisma/engines",
+      "prisma",
+      "esbuild"
+    ]
+  },
   "scripts": {
     "dev": "node scripts/setup-env.mjs && pnpm --filter @data-bridge/core build && concurrently -n api,web -c magenta,cyan \"pnpm --filter @data-bridge/api dev\" \"pnpm --filter @data-bridge/web dev\"",
     "dev:api": "pnpm --filter @data-bridge/api dev",

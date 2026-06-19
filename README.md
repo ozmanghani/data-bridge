@@ -52,6 +52,16 @@ The rest is the same whichever trigger you pick:
 
 ## Get started
 
+You'll need **Node 22+**, **pnpm 10+**, and **Docker**. The repo pins both via
+`.nvmrc` and `packageManager`, so the easiest setup is:
+
+```bash
+nvm use            # picks up Node 22 from .nvmrc (or just use Node 22+ yourself)
+corepack enable    # gives you the exact pnpm version the repo expects
+```
+
+Then:
+
 ```bash
 pnpm install                  # frontend + backend
 docker compose up -d          # postgres (metadata) + redis (job queue)
@@ -70,6 +80,14 @@ and the web app.
 ```
 
 Working on the code? `pnpm dev` is the same thing in watch mode.
+
+> **Install trouble?** `better-sqlite3` is the only dependency that needs a
+> native binary. On Node 22+ it installs a prebuilt one — no compiler needed.
+> If you see it fall back to `node-gyp` (or a `tsc: command not found` right
+> after, which just means the install bailed early), you're usually on a Node
+> version without a prebuild or a distro-packaged pnpm with a broken node-gyp.
+> Fix: use Node 22+ (`nvm use`), get pnpm via `corepack enable` instead of your
+> system package manager, then `pnpm install` again.
 
 > The two services back different things. **Postgres** holds Data Bridge's own
 > metadata (saved connections, hooks, runs, deliveries) through Prisma.
