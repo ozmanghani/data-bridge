@@ -13,6 +13,21 @@ import type {
 import { ConnectionError, QueryError, UnsupportedError } from '../../errors';
 import { assertSafeIdentifier, BaseSqlAdapter } from './base-sql-adapter';
 
+/**
+ * better-sqlite3 only binds numbers, strings, bigints, buffers and null. coerce
+ * the richer values that flow in from other engines (booleans, Dates, JSON
+ * objects) into a storable scalar so a cross-engine bridge into SQLite works.
+ */
+function coerceSqliteParam(value: unknown): unknown {
+  if (value === undefined) return null;
+  if (typeof value === 'boolean') return value ? 1 : 0;
+  if (value instanceof Date) return value.toISOString();
+  if (value !== null && typeof value === 'object' && !Buffer.isBuffer(value)) {
+    return JSON.stringify(value);
+  }
+  return value;
+}
+
 export const SQLITE_CAPABILITIES: AdapterCapabilities = {
   query: true,
   queryLanguage: 'sql',
@@ -77,11 +92,12 @@ export class SqliteAdapter extends BaseSqlAdapter {
   ): Promise<QueryResult> {
     const db = this.getDb();
     const started = performance.now();
+    const bound = params.map(coerceSqliteParam);
     try {
       const stmt = db.prepare(sql);
       const isSelect = stmt.reader;
       if (isSelect) {
-        const rows = stmt.all(...(params as never[])) as Array<
+        const rows = stmt.all(...(bound as never[])) as Array<
           Record<string, unknown>
         >;
         const columns = (stmt.columns?.() ?? []).map((c) => ({
@@ -101,7 +117,7 @@ export class SqliteAdapter extends BaseSqlAdapter {
           command: 'SELECT',
         };
       }
-      const info = stmt.run(...(params as never[]));
+      const info = stmt.run(...(bound as never[]));
       return {
         columns: [],
         rows: [],

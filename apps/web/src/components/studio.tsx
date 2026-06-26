@@ -1,7 +1,8 @@
 'use client';
 
 import { useEffect } from 'react';
-import { Database, Webhook } from 'lucide-react';
+import Image from 'next/image';
+import { Database } from 'lucide-react';
 import { useStudio } from '@/lib/store';
 import {
   ResizableHandle,
@@ -49,9 +50,14 @@ export function Studio() {
     const p = new URLSearchParams();
     if (selectedHookId) p.set('hook', selectedHookId);
     if (dataSourcesOpen) p.set('data', '1');
-    if (hookEditor.open && hookEditor.editingId) p.set('edit', hookEditor.editingId);
+    if (hookEditor.open && hookEditor.editingId)
+      p.set('edit', hookEditor.editingId);
     const qs = p.toString();
-    window.history.replaceState(null, '', qs ? `?${qs}` : window.location.pathname);
+    window.history.replaceState(
+      null,
+      '',
+      qs ? `?${qs}` : window.location.pathname,
+    );
   }, [selectedHookId, dataSourcesOpen, hookEditor.open, hookEditor.editingId]);
 
   return (
@@ -61,11 +67,24 @@ export function Studio() {
         <ResizablePanel defaultSize={22} minSize={16} maxSize={32}>
           <div className="flex h-full flex-col border-r">
             <div className="flex items-center justify-between px-3 py-2.5">
-              <div className="flex items-center gap-2">
-                <span className="bg-primary/10 flex h-6 w-6 items-center justify-center rounded-md">
-                  <Webhook className="text-primary h-4 w-4" />
-                </span>
-                <span className="font-semibold tracking-tight">Data Bridge</span>
+              <div className="flex items-center">
+                {/* dark artwork in light mode, white artwork in dark mode */}
+                <Image
+                  src="/logo-dark.png"
+                  alt="Data Bridge"
+                  width={747}
+                  height={412}
+                  priority
+                  className="h-7 w-auto dark:hidden"
+                />
+                <Image
+                  src="/logo-white.png"
+                  alt="Data Bridge"
+                  width={747}
+                  height={412}
+                  priority
+                  className="hidden h-7 w-auto dark:block"
+                />
               </div>
               <div className="flex items-center gap-0.5">
                 <Button

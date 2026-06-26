@@ -2,7 +2,7 @@
 
 import { Ban, Loader2, Play, RotateCcw } from 'lucide-react';
 import { toast } from 'sonner';
-import type { HookRun, HookRunStatus } from '@data-bridge/core';
+import type { EndpointInfo, HookRun, HookRunStatus } from '@data-bridge/core';
 import { ApiError } from '@/lib/api';
 import {
   useCancelHookRun,
@@ -86,7 +86,7 @@ export function RunDetail({
 }: {
   hookId: string;
   run: HookRun;
-  endpoint: { url: string; method: string };
+  endpoint: EndpointInfo;
   /** hooks (watch/CDC) are continuous listeners: no Cancel/Resume, no progress */
   isHook: boolean;
 }) {

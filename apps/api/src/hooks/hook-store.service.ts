@@ -44,6 +44,9 @@ export class HookStoreService {
     sanitized: HookDestination;
     secret: string | null;
   } {
+    // database destinations keep no secret of their own, the target connection
+    // holds its (separately-encrypted) credentials
+    if (dest.kind !== 'http') return { sanitized: dest, secret: null };
     const auth = dest.auth;
     if (auth.type === 'bearer') {
       return {
@@ -68,6 +71,7 @@ export class HookStoreService {
     dest: HookDestination,
     secret: string | null,
   ): HookDestination {
+    if (dest.kind !== 'http') return dest;
     const auth = dest.auth;
     if (auth.type === 'bearer') {
       return { ...dest, auth: { ...auth, token: secret ?? '' } };

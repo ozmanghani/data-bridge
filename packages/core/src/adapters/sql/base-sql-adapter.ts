@@ -27,6 +27,7 @@ import type {
   RestoreResult,
   TableSchema,
   UpdateRowParams,
+  UpsertRowParams,
 } from '../types';
 import { BadRequestError } from '../../errors';
 
@@ -321,6 +322,44 @@ export abstract class BaseSqlAdapter implements DatabaseAdapter {
       .join(' AND ');
 
     return this.runSql(`DELETE FROM ${target} WHERE ${whereSql}`, params);
+  }
+
+  /**
+   * dialect-specific "upsert" tail appended to an `INSERT ... VALUES (...)`.
+   * given the conflict key columns and the full column list, return the
+   * `ON CONFLICT ...` / `ON DUPLICATE KEY UPDATE ...` clause. Postgres & SQLite
+   * share the standard form, MySQL overrides.
+   */
+  protected upsertClause(keyColumns: string[], allColumns: string[]): string {
+    const updates = allColumns
+      .filter((c) => !keyColumns.includes(c))
+      .map((c) => `${this.quoteIdent(c)} = EXCLUDED.${this.quoteIdent(c)}`);
+    const keys = keyColumns.map((c) => this.quoteIdent(c)).join(', ');
+    // no non-key columns to update → just ignore the duplicate
+    if (updates.length === 0) return `ON CONFLICT (${keys}) DO NOTHING`;
+    return `ON CONFLICT (${keys}) DO UPDATE SET ${updates.join(', ')}`;
+  }
+
+  async upsertRow(p: UpsertRowParams): Promise<QueryResult> {
+    const cols = Object.keys(p.values);
+    if (cols.length === 0) {
+      throw new BadRequestError('Cannot upsert a row with no values');
+    }
+    if (p.keyColumns.length === 0) {
+      throw new BadRequestError(
+        'Cannot upsert without key columns to match on',
+      );
+    }
+    const target = this.qualify(p.table, p.schema);
+    const placeholders = cols.map((_, i) => this.placeholder(i + 1));
+    const sql =
+      `INSERT INTO ${target} (${cols.map((c) => this.quoteIdent(c)).join(', ')}) ` +
+      `VALUES (${placeholders.join(', ')}) ` +
+      this.upsertClause(p.keyColumns, cols);
+    return this.runSql(
+      sql,
+      cols.map((c) => p.values[c]),
+    );
   }
 
   /* ----- schema management (DDL) ----- */

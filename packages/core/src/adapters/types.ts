@@ -253,6 +253,20 @@ export interface DeleteRowParams {
   identity: RowIdentity;
 }
 
+/**
+ * insert-or-update a row keyed by `keyColumns`. used by database-to-database
+ * bridges so a re-delivered row never duplicates: each engine performs this
+ * atomically in its native dialect (Postgres/SQLite `ON CONFLICT`, MySQL
+ * `ON DUPLICATE KEY`, Mongo `updateOne({upsert:true})`).
+ */
+export interface UpsertRowParams {
+  schema?: string;
+  table: string;
+  values: Record<string, unknown>;
+  /** columns that uniquely identify the row (must be a unique/primary key) */
+  keyColumns: string[];
+}
+
 /* -------------------------------------------------------------------------- */
 /* schema management (DDL)                                                     */
 /* -------------------------------------------------------------------------- */
@@ -342,6 +356,8 @@ export interface DatabaseAdapter {
   insertRow(params: InsertRowParams): Promise<QueryResult>;
   updateRow(params: UpdateRowParams): Promise<QueryResult>;
   deleteRow(params: DeleteRowParams): Promise<QueryResult>;
+  /** insert-or-update keyed by `keyColumns`, atomic in the engine's dialect */
+  upsertRow(params: UpsertRowParams): Promise<QueryResult>;
 
   /* schema management, guarded by `capabilities.ddl` / `manageDatabases` */
   createDatabase(name: string): Promise<void>;

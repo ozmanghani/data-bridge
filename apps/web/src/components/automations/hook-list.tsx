@@ -1,7 +1,7 @@
 'use client';
 
 import { Plus, Radio, Zap, Network, Workflow, AlertTriangle } from 'lucide-react';
-import type { Hook } from '@data-bridge/core';
+import { destinationLabel, type Hook } from '@data-bridge/core';
 import { useHooks, useHookStatuses } from '@/lib/queries';
 import { useStudio } from '@/lib/store';
 import { cn } from '@/lib/utils';
@@ -13,12 +13,7 @@ function sourceLabel(hook: Hook): string {
 }
 
 function destLabel(hook: Hook): string {
-  try {
-    const { hostname } = new URL(hook.destination.url);
-    return `${hook.destination.method} ${hostname}`;
-  } catch {
-    return hook.destination.method;
-  }
+  return destinationLabel(hook.destination);
 }
 
 type RunState = 'live' | 'failed' | 'idle' | 'off';

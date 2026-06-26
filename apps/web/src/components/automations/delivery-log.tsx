@@ -11,7 +11,11 @@ import {
   X,
 } from 'lucide-react';
 import { toast } from 'sonner';
-import type { DeliveryStatus, HookDelivery } from '@data-bridge/core';
+import type {
+  DeliveryStatus,
+  EndpointInfo,
+  HookDelivery,
+} from '@data-bridge/core';
 import { ApiError } from '@/lib/api';
 import { useHookDeliveries, useSkipDeliveries } from '@/lib/queries';
 import { cn } from '@/lib/utils';
@@ -61,7 +65,7 @@ export function DeliveryMonitor({
   live:      boolean;
   totalRows: number | null;
   batchSize: number;
-  endpoint:  { url: string; method: string };
+  endpoint: EndpointInfo;
 }) {
   const cellCount = totalRows != null
     ? Math.ceil(totalRows / Math.max(1, batchSize))
@@ -440,7 +444,7 @@ function DeliveryDetail({
   onClose,
 }: {
   delivery: HookDelivery;
-  endpoint: { url: string; method: string };
+  endpoint: EndpointInfo;
   onClose:  () => void;
 }) {
   function copyCurl() {
@@ -459,6 +463,8 @@ function DeliveryDetail({
     : d.status === 'skipped' ? 'bg-amber-500/15 text-amber-700 dark:text-amber-400'
     : 'bg-destructive/15 text-destructive';
 
+  const isDb = endpoint.kind === 'database';
+
   return (
     <div className="h-full overflow-y-auto">
       <div className="space-y-3 p-3 text-xs">
@@ -470,8 +476,11 @@ function DeliveryDetail({
           {d.httpStatus != null && (
             <span className="text-muted-foreground font-mono">HTTP {d.httpStatus}</span>
           )}
+          {isDb && (
+            <span className="text-muted-foreground font-mono">DB write</span>
+          )}
           <div className="ml-auto flex items-center gap-1">
-            {d.status !== 'skipped' && (
+            {!isDb && d.status !== 'skipped' && (
               <Button variant="ghost" size="sm" className="h-7 px-2" onClick={copyCurl}>
                 <Copy className="mr-1 h-3.5 w-3.5" /> cURL
               </Button>
@@ -512,12 +521,16 @@ function DeliveryDetail({
 
         {d.status !== 'skipped' ? (
           <>
-            <Block label="Request body">{pretty(d.requestBody) || '—'}</Block>
-            <Block label="Response">{pretty(d.responseBody) || '(empty)'}</Block>
+            <Block label={isDb ? 'Row written' : 'Request body'}>
+              {pretty(d.requestBody) || '—'}
+            </Block>
+            <Block label={isDb ? 'Write result' : 'Response'}>
+              {pretty(d.responseBody) || '(empty)'}
+            </Block>
           </>
         ) : (
           <p className="text-muted-foreground">
-            This delivery was skipped and never sent to the endpoint.
+            This delivery was skipped and never {isDb ? 'written' : 'sent'}.
           </p>
         )}
       </div>

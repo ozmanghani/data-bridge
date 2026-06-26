@@ -7,7 +7,7 @@
  * truncated response snippet is kept.
  */
 import { Injectable, Logger } from '@nestjs/common';
-import type { HookDeliveryConfig, HookDestination } from '@data-bridge/core';
+import type { HookDeliveryConfig, HttpDestination } from '@data-bridge/core';
 import type { DeliveryOutcome } from './hooks.types';
 
 const RETRYABLE_STATUS = new Set([408, 425, 429, 500, 502, 503, 504]);
@@ -19,7 +19,7 @@ export class DeliveryService {
 
   /** build request headers, merging static headers with the auth scheme */
   buildHeaders(
-    dest: HookDestination,
+    dest: HttpDestination,
     idempotencyKey?: string,
   ): Record<string, string> {
     const headers: Record<string, string> = {
@@ -38,7 +38,7 @@ export class DeliveryService {
   }
 
   /** headers with the auth secret redacted, safe for preview/UI */
-  redactedHeaders(dest: HookDestination): Record<string, string> {
+  redactedHeaders(dest: HttpDestination): Record<string, string> {
     const headers = this.buildHeaders(dest);
     if (dest.auth.type === 'bearer' && headers['authorization']) {
       headers['authorization'] = 'Bearer ********';
@@ -56,7 +56,7 @@ export class DeliveryService {
    */
   async send(
     body: unknown,
-    dest: HookDestination,
+    dest: HttpDestination,
     delivery: HookDeliveryConfig,
     runSignal: AbortSignal,
     idempotencyKey?: string,

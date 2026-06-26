@@ -29,6 +29,7 @@ import { AdapterPoolService } from '../connections/adapter-pool.service';
 import { PrismaService } from '../common/prisma.service';
 import { HookStoreService } from './hook-store.service';
 import { DeliveryService, sleep } from './delivery.service';
+import { DatabaseSinkService } from './database-sink.service';
 import { RunRegistryService } from './run-registry.service';
 import {
   HOOK_RUNS_QUEUE,
@@ -54,6 +55,7 @@ export class HookRunService implements OnModuleInit {
     private readonly registry: RunRegistryService,
     private readonly pool: AdapterPoolService,
     private readonly delivery: DeliveryService,
+    private readonly databaseSink: DatabaseSinkService,
     @InjectQueue(HOOK_RUNS_QUEUE) private readonly queue: Queue<HookRunJob>,
   ) {}
 
@@ -74,6 +76,7 @@ export class HookRunService implements OnModuleInit {
     });
     if (failed.length === 0) throw new BadRequestError('No failed deliveries to retry.');
 
+    const dest = hook.destination;
     const signal = new AbortController().signal;
     for (const d of failed) {
       let body: unknown = null;
@@ -84,14 +87,19 @@ export class HookRunService implements OnModuleInit {
           body = d.requestBody;
         }
       }
-      const idem = hook.destination.idempotency ? `${runId}:${d.sequence}` : undefined;
-      const outcome = await this.delivery.send(
-        body,
-        hook.destination,
-        hook.delivery,
-        signal,
-        idem,
-      );
+      let outcome: DeliveryOutcome;
+      if (dest.kind === 'database') {
+        // the captured requestBody is the already-mapped target row(s); replay
+        // it through the sink with identity mapping (the upsert is idempotent)
+        const rows = (Array.isArray(body) ? body : [body]).filter(
+          (r): r is Record<string, unknown> => !!r && typeof r === 'object',
+        );
+        const retryTargets = dest.targets.map((t) => ({ ...t, mapping: [] }));
+        outcome = await this.databaseSink.deliver(hook, retryTargets, rows, undefined);
+      } else {
+        const idem = dest.idempotency ? `${runId}:${d.sequence}` : undefined;
+        outcome = await this.delivery.send(body, dest, hook.delivery, signal, idem);
+      }
       await this.recordDelivery(
         runId,
         {

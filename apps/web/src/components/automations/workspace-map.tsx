@@ -50,7 +50,7 @@ type BridgeNodeData = {
   status: BridgeStatus;
   selected: boolean;
 };
-type DestNodeData = { host: string };
+type DestNodeData = { label: string; kind: 'http' | 'database' };
 
 function ConnectionNode({ data }: NodeProps<Node<ConnNodeData>>) {
   return (
@@ -98,8 +98,12 @@ function DestinationNode({ data }: NodeProps<Node<DestNodeData>>) {
   return (
     <div className="bg-card flex min-w-[150px] items-center gap-2 rounded-md border px-3 py-2 shadow-sm">
       <Handle type="target" position={Position.Left} className="!bg-primary" />
-      <Globe className="h-4 w-4 shrink-0 text-sky-500" />
-      <span className="truncate text-xs font-medium">{data.host}</span>
+      {data.kind === 'database' ? (
+        <Database className="h-4 w-4 shrink-0 text-emerald-500" />
+      ) : (
+        <Globe className="h-4 w-4 shrink-0 text-sky-500" />
+      )}
+      <span className="truncate text-xs font-medium">{data.label}</span>
     </div>
   );
 }
@@ -116,6 +120,20 @@ function hostOf(url: string): string {
   } catch {
     return url;
   }
+}
+
+/** the destination node(s) a bridge feeds: one HTTP host, or N database tables */
+function destsOf(
+  h: Hook,
+): { key: string; label: string; kind: 'http' | 'database' }[] {
+  if (h.destination.kind === 'database') {
+    return h.destination.targets.map((t) => {
+      const tbl = t.schema ? `${t.schema}.${t.table}` : t.table;
+      return { key: `db:${t.connectionId}:${tbl}`, label: tbl, kind: 'database' as const };
+    });
+  }
+  const host = hostOf(h.destination.url);
+  return [{ key: `http:${host}`, label: host, kind: 'http' as const }];
 }
 
 function buildGraph(
@@ -141,14 +159,17 @@ function buildGraph(
     });
   });
 
-  // right column: unique destination hosts
-  const hosts = [...new Set(hooks.map((h) => hostOf(h.destination.url)))];
-  hosts.forEach((host, i) => {
+  // right column: unique destinations (HTTP hosts and/or database tables)
+  const destMap = new Map<string, { label: string; kind: 'http' | 'database' }>();
+  for (const h of hooks) {
+    for (const d of destsOf(h)) destMap.set(d.key, { label: d.label, kind: d.kind });
+  }
+  [...destMap.entries()].forEach(([key, d], i) => {
     nodes.push({
-      id: `dest-${host}`,
+      id: `dest-${key}`,
       type: 'destination',
       position: { x: 620, y: i * ROW },
-      data: { host },
+      data: { label: d.label, kind: d.kind },
     });
   });
 
@@ -177,13 +198,15 @@ function buildGraph(
       animated,
       style,
     });
-    edges.push({
-      id: `e-dest-${h.id}`,
-      source: `bridge-${h.id}`,
-      target: `dest-${hostOf(h.destination.url)}`,
-      animated,
-      style,
-    });
+    for (const d of destsOf(h)) {
+      edges.push({
+        id: `e-dest-${h.id}-${d.key}`,
+        source: `bridge-${h.id}`,
+        target: `dest-${d.key}`,
+        animated,
+        style,
+      });
+    }
   });
 
   return { nodes, edges };

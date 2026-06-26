@@ -19,6 +19,7 @@ import type {
   QueryResult,
   RestoreResult,
   UpdateRowParams,
+  UpsertRowParams,
 } from '../types';
 import {
   BadRequestError,
@@ -285,6 +286,11 @@ export class RedisAdapter implements DatabaseAdapter {
     if (client.status !== 'ready') await client.connect().catch(() => {});
     const removed = await client.del(String(p.identity.key ?? ''));
     return writeResult(removed, 'del');
+  }
+
+  /** a SET is already idempotent, so upsert is just insert by key */
+  async upsertRow(p: UpsertRowParams): Promise<QueryResult> {
+    return this.insertRow({ table: p.table, schema: p.schema, values: p.values });
   }
 
   /* ----- schema management: doesn't apply to a key-value store ----- */

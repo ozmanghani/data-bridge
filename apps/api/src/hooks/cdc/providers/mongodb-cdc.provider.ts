@@ -102,10 +102,39 @@ export class MongodbCdcProvider implements CdcProvider {
     }
   }
 
-  /* ----- provisioning: nothing to do, the oplog already exists ----- */
+  /* ----- provisioning ----- */
 
-  async provision(): Promise<void> {
-    /* no-op */
+  /**
+   * enable change-stream pre-images on the source collection so DELETE (and
+   * UPDATE) events carry the full prior document. without this, Mongo's delete
+   * event only includes `_id`, so a bridge keyed on a business column couldn't
+   * locate the row to remove in downstream databases. requires MongoDB 6.0+,
+   * on older servers this is a best-effort no-op (deletes then carry only _id).
+   */
+  async provision(
+    _hookId: string,
+    hook: ResolvedHook,
+    conn: ConnectionConfig,
+  ): Promise<void> {
+    if (hook.source.kind !== 'table') return;
+    const table = hook.source.table;
+    const client = new MongoClient(this.uri(conn), { serverSelectionTimeoutMS: 8000 });
+    try {
+      await client.connect();
+      const db = client.db(hook.source.database || conn.database || 'test');
+      await db.command({
+        collMod: table,
+        changeStreamPreAndPostImages: { enabled: true },
+      });
+      this.logger.log(`Enabled change-stream pre-images on "${table}"`);
+    } catch (err) {
+      this.logger.warn(
+        `Could not enable pre-images on "${table}" (${(err as Error).message}). ` +
+          `Deletes will carry only _id and may not propagate by business key.`,
+      );
+    } finally {
+      await client.close().catch(() => undefined);
+    }
   }
   async deprovision(): Promise<void> {
     /* no-op */
@@ -138,7 +167,13 @@ export class MongodbCdcProvider implements CdcProvider {
     const loop = async (): Promise<void> => {
       while (!stopped) {
         try {
-          const options: Document = { fullDocument: 'updateLookup' };
+          // `updateLookup` gives the post-image on updates; `whenAvailable`
+          // pre-images give the pre-delete document (when provisioned) so we can
+          // route deletes by a business key, not just _id.
+          const options: Document = {
+            fullDocument: 'updateLookup',
+            fullDocumentBeforeChange: 'whenAvailable',
+          };
           if (resumeToken) options.startAfter = resumeToken;
           const stream = collection.watch(pipeline, options);
           current = stream;
@@ -200,8 +235,12 @@ export class MongodbCdcProvider implements CdcProvider {
         return { op, row, cursor };
       }
       case 'delete': {
+        // prefer the pre-image (full prior document, incl. business keys); fall
+        // back to documentKey (_id only) when pre-images aren't enabled
+        const before = (change as { fullDocumentBeforeChange?: Record<string, unknown> })
+          .fullDocumentBeforeChange;
         const key = (change as { documentKey?: Record<string, unknown> }).documentKey ?? {};
-        return { op: 'delete', row: key, cursor };
+        return { op: 'delete', row: before ?? key, cursor };
       }
       default:
         return null; // drop, rename, invalidate, etc

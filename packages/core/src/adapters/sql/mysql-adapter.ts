@@ -88,6 +88,26 @@ export class MysqlAdapter extends BaseSqlAdapter {
     return 'AUTO_INCREMENT';
   }
 
+  /**
+   * MySQL has no `ON CONFLICT`, it upserts via `ON DUPLICATE KEY UPDATE` which
+   * keys off any unique/primary index on the row (the `keyColumns` must be one).
+   */
+  protected override upsertClause(
+    keyColumns: string[],
+    allColumns: string[],
+  ): string {
+    const updates = allColumns
+      .filter((c) => !keyColumns.includes(c))
+      .map((c) => `${this.quoteIdent(c)} = VALUES(${this.quoteIdent(c)})`);
+    // nothing to update → keep the existing row, but make it a no-op upsert by
+    // re-assigning a key column to itself (valid + idempotent)
+    if (updates.length === 0) {
+      const k = this.quoteIdent(keyColumns[0]!);
+      return `ON DUPLICATE KEY UPDATE ${k} = ${k}`;
+    }
+    return `ON DUPLICATE KEY UPDATE ${updates.join(', ')}`;
+  }
+
   protected override async runSql(
     sql: string,
     params: unknown[],
@@ -142,13 +162,13 @@ export class MysqlAdapter extends BaseSqlAdapter {
 
   async listDatabases(): Promise<string[]> {
     const res = await this.runSql(
-      `SELECT schema_name FROM information_schema.schemata
+      `SELECT schema_name AS \`schema_name\` FROM information_schema.schemata
        WHERE schema_name NOT IN
          ('information_schema','performance_schema','mysql','sys')
        ORDER BY schema_name`,
       [],
     );
-    return res.rows.map((r) => String(r.schema_name));
+    return res.rows.map((r) => String(r.schema_name ?? r.SCHEMA_NAME));
   }
 
   async getSchema(): Promise<DatabaseSchema> {
@@ -162,7 +182,10 @@ export class MysqlAdapter extends BaseSqlAdapter {
     }
 
     const pool = this.getPool();
-    const [colRows] = await pool.query<RowDataPacket[]>(
+    // Some MySQL servers return information_schema column names upper-cased
+    // (e.g. TABLE_NAME), so normalize every result row's keys to lower case
+    // before reading them — otherwise table names / primary keys come back empty.
+    const [colRaw] = await pool.query<RowDataPacket[]>(
       `SELECT table_name, column_name, column_type, is_nullable,
               column_default, column_key, extra, table_type, ordinal_position
        FROM information_schema.columns c
@@ -171,22 +194,25 @@ export class MysqlAdapter extends BaseSqlAdapter {
        ORDER BY table_name, ordinal_position`,
       [database],
     );
+    const colRows = colRaw.map(lowerKeys);
 
-    const [fkRows] = await pool.query<RowDataPacket[]>(
+    const [fkRaw] = await pool.query<RowDataPacket[]>(
       `SELECT table_name, column_name, constraint_name,
               referenced_table_name, referenced_column_name
        FROM information_schema.key_column_usage
        WHERE table_schema = ? AND referenced_table_name IS NOT NULL`,
       [database],
     );
+    const fkRows = fkRaw.map(lowerKeys);
 
-    const [idxRows] = await pool.query<RowDataPacket[]>(
+    const [idxRaw] = await pool.query<RowDataPacket[]>(
       `SELECT table_name, index_name, column_name, non_unique
        FROM information_schema.statistics
        WHERE table_schema = ?
        ORDER BY table_name, index_name, seq_in_index`,
       [database],
     );
+    const idxRows = idxRaw.map(lowerKeys);
 
     const fkByTableCol = new Map<string, { table: string; column: string }>();
     const fkByTable = new Map<string, ForeignKeySchema[]>();
@@ -261,4 +287,15 @@ export class MysqlAdapter extends BaseSqlAdapter {
       namespaces: [{ name: '', tables: [...tableMap.values()] }],
     };
   }
+}
+
+/**
+ * return a copy of a result row with all keys lower-cased. MySQL servers differ
+ * in whether `information_schema` columns come back lower- or upper-cased, so
+ * normalizing keeps the introspection code reading a single, predictable shape.
+ */
+function lowerKeys(row: Record<string, unknown>): Record<string, unknown> {
+  const out: Record<string, unknown> = {};
+  for (const [k, v] of Object.entries(row)) out[k.toLowerCase()] = v;
+  return out;
 }

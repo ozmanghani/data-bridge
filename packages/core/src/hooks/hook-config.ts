@@ -42,7 +42,9 @@ export const hookAuthSchema = z.discriminatedUnion('type', [
   z.object({ type: z.literal('header'), name: z.string().min(1), value: z.string() }),
 ]);
 
-export const hookDestinationSchema = z.object({
+/* ---- HTTP destination: POST/PUT/PATCH each batch to an endpoint ---- */
+export const httpDestinationSchema = z.object({
+  kind: z.literal('http'),
   url: z.string().url('Enter a valid http(s) URL'),
   method: z.enum(['POST', 'PUT', 'PATCH']).default('POST'),
   headers: z.record(z.string(), z.string()).optional(),
@@ -53,6 +55,54 @@ export const hookDestinationSchema = z.object({
    */
   idempotency: z.boolean().default(false),
 });
+
+/* ---- Database destination: write each row into one or more databases ---- */
+
+/** map one source column onto a (possibly differently-named) target column */
+export const columnMappingSchema = z.object({
+  source: z.string().min(1),
+  target: z.string().min(1),
+});
+
+/** a single database/table a bridge writes into (a hook can have several) */
+export const databaseTargetSchema = z.object({
+  connectionId: z.string().min(1),
+  database: z.string().optional(),
+  schema: z.string().optional(),
+  /** target table / collection */
+  table: z.string().min(1),
+  /**
+   * `upsert` (default) writes idempotently keyed by `keyColumns`, so replays
+   * and at-least-once redeliveries never duplicate. `insert` always appends.
+   */
+  writeMode: z.enum(['upsert', 'insert']).default('upsert'),
+  /** target columns that uniquely identify a row (required for upsert) */
+  keyColumns: z.array(z.string().min(1)).default([]),
+  /** explicit source→target column mapping. empty = identity (same names) */
+  mapping: z.array(columnMappingSchema).default([]),
+  /** create the target table from the source schema when it doesn't exist */
+  createMissingTable: z.boolean().default(true),
+});
+
+export const databaseDestinationSchema = z.object({
+  kind: z.literal('database'),
+  targets: z.array(databaseTargetSchema).min(1, 'Add at least one target database'),
+});
+
+/**
+ * a hook's destination is either an HTTP endpoint or one/more databases.
+ * older hooks were stored without a `kind`, so normalize those to `http` to
+ * stay backward compatible with persisted configs and run snapshots.
+ */
+export const hookDestinationSchema = z.preprocess(
+  (val) => {
+    if (val && typeof val === 'object' && !('kind' in (val as object))) {
+      return { ...(val as object), kind: 'http' };
+    }
+    return val;
+  },
+  z.discriminatedUnion('kind', [httpDestinationSchema, databaseDestinationSchema]),
+);
 
 /* -------------------------------------------------------------------------- */
 /* Transform, how each row becomes a body                                     */
@@ -180,6 +230,10 @@ export const cdcReadinessSchema = z.object({
 
 export type HookSource = z.infer<typeof hookSourceSchema>;
 export type HookAuth = z.infer<typeof hookAuthSchema>;
+export type HttpDestination = z.infer<typeof httpDestinationSchema>;
+export type ColumnMapping = z.infer<typeof columnMappingSchema>;
+export type DatabaseTarget = z.infer<typeof databaseTargetSchema>;
+export type DatabaseDestination = z.infer<typeof databaseDestinationSchema>;
 export type HookDestination = z.infer<typeof hookDestinationSchema>;
 export type HookTransformConfig = z.infer<typeof hookTransformSchema>;
 export type HookDeliveryConfig = z.infer<typeof hookDeliverySchema>;
@@ -267,13 +321,29 @@ export interface HookDelivery {
   createdAt: string;
 }
 
+/** a database target as summarized for the preview panel */
+export interface HookPreviewTarget {
+  label: string;
+  writeMode: string;
+  keyColumns: string[];
+  createMissingTable: boolean;
+}
+
 /** result of the preview endpoint: rendered bodies + resolved request shape */
 export interface HookPreview {
-  method: string;
-  url: string;
+  /** which kind of destination this preview is for */
+  destinationKind: 'http' | 'database';
+  /* HTTP destinations only */
+  method?: string;
+  url?: string;
   /** headers with any auth secret redacted */
-  headers: Record<string, string>;
-  /** one rendered body per sample row (or per batch when batched) */
+  headers?: Record<string, string>;
+  /* database destinations only: where each row is written */
+  targets?: HookPreviewTarget[];
+  /**
+   * one rendered body per sample row. for HTTP this is the request payload, for
+   * a database it's the row as it will be written to the (first) target.
+   */
   bodies: unknown[];
   warnings: string[];
   /** true when the rows came from the live source rather than a sample */

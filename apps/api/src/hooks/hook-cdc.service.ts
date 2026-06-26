@@ -22,7 +22,6 @@ import {
 import {
   BadRequestError,
   ConflictError,
-  renderRow,
   type CdcOperation,
   type CdcReadiness,
   type CdcReadinessDTO,
@@ -35,7 +34,7 @@ import { ConnectionStoreService } from '../connections/connection-store.service'
 import { PrismaService } from '../common/prisma.service';
 import { HookRunService } from './hook-run.service';
 import { HookStoreService } from './hook-store.service';
-import { DeliveryService } from './delivery.service';
+import { HookSinkService } from './hook-sink.service';
 import type { ResolvedHook } from './hooks.types';
 import {
   CDC_PROVIDERS,
@@ -75,7 +74,7 @@ export class HookCdcService implements OnModuleInit, OnModuleDestroy {
     private readonly prisma: PrismaService,
     private readonly store: HookStoreService,
     private readonly connStore: ConnectionStoreService,
-    private readonly delivery: DeliveryService,
+    private readonly sink: HookSinkService,
     private readonly runs: HookRunService,
     @Inject(CDC_PROVIDERS) providers: CdcProvider[],
   ) {
@@ -254,17 +253,22 @@ export class HookCdcService implements OnModuleInit, OnModuleDestroy {
 
     const seq = stream.seq;
     const now = new Date().toISOString();
-    // expose the change operation to the template as {{$op}}
-    const { body } = renderRow({ ...change.row, $op: change.op as CdcOperation }, hook.transform, {
-      table: hook.source.table,
-      now,
-      index: seq,
-    });
     // key on the cursor (stable per change) so an at-least-once re-delivery after
     // a reconnect carries the SAME Idempotency-Key for the receiver to dedupe
-    const idem = hook.destination.idempotency ? `${stream.runId}:${change.cursor}` : undefined;
+    const idem =
+      hook.destination.kind === 'http' && hook.destination.idempotency
+        ? `${stream.runId}:${change.cursor}`
+        : undefined;
     const signal = new AbortController().signal;
-    const outcome = await this.delivery.send(body, hook.destination, hook.delivery, signal, idem);
+    // the operation drives both the {{$op}} token (HTTP) and insert/upsert vs
+    // delete routing (database destinations)
+    const { outcome } = await this.sink.deliver(
+      hook,
+      [change.row],
+      { table: hook.source.table, now, startIndex: seq, op: change.op as CdcOperation },
+      signal,
+      idem,
+    );
 
     const pkVals = Object.values(change.row);
     await this.runs.recordDelivery(

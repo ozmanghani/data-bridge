@@ -23,6 +23,7 @@ import type {
   RestoreResult,
   TableSchema,
   UpdateRowParams,
+  UpsertRowParams,
 } from '../types';
 import {
   BadRequestError,
@@ -261,6 +262,19 @@ export class MongodbAdapter implements DatabaseAdapter {
     const db = await this.getDb(p.schema);
     const res = await db.collection(p.table).deleteOne(coerceId(p.identity));
     return writeResult(res.deletedCount, 'deleteOne');
+  }
+
+  async upsertRow(p: UpsertRowParams): Promise<QueryResult> {
+    if (p.keyColumns.length === 0) {
+      throw new QueryError('Cannot upsert without key columns to match on');
+    }
+    const db = await this.getDb(p.schema);
+    const filter: Record<string, unknown> = {};
+    for (const k of p.keyColumns) filter[k] = p.values[k];
+    const res = await db
+      .collection(p.table)
+      .updateOne(coerceId(filter), { $set: p.values }, { upsert: true });
+    return writeResult(res.modifiedCount + (res.upsertedCount ?? 0), 'upsertOne');
   }
 
   /* ----- schema management ----- */

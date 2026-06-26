@@ -22,6 +22,7 @@ import {
   cdcReadinessSchema,
   hookInputSchema,
   hookPreviewSchema,
+  mapRow,
   renderRow,
   skipSchema,
   startRunSchema,
@@ -116,6 +117,29 @@ export class HooksController {
       fromSource = true;
     }
 
+    const dest = hook.destination;
+
+    // database destination: preview the mapped row(s) and where they land
+    if (dest.kind === 'database') {
+      const mapping = dest.targets[0]?.mapping ?? [];
+      const warnings: string[] = [];
+      if (dest.targets.some((t) => t.writeMode === 'upsert' && t.keyColumns.length === 0)) {
+        warnings.push('A target is set to upsert but has no key columns selected.');
+      }
+      return {
+        destinationKind: 'database',
+        targets: dest.targets.map((t) => ({
+          label: t.schema ? `${t.schema}.${t.table}` : t.table,
+          writeMode: t.writeMode,
+          keyColumns: t.keyColumns,
+          createMissingTable: t.createMissingTable,
+        })),
+        bodies: rows.map((row) => mapRow(row, mapping)),
+        warnings,
+        fromSource,
+      };
+    }
+
     const warnings = new Set<string>();
     const bodies = rows.map((row, index) => {
       const result = renderRow(row, hook.transform, { table, now, index });
@@ -124,9 +148,10 @@ export class HooksController {
     });
 
     return {
-      method: hook.destination.method,
-      url: hook.destination.url,
-      headers: this.delivery.redactedHeaders(hook.destination),
+      destinationKind: 'http',
+      method: dest.method,
+      url: dest.url,
+      headers: this.delivery.redactedHeaders(dest),
       bodies,
       warnings: [...warnings],
       fromSource,

@@ -1,14 +1,19 @@
 <div align="center">
 
-# 🌉 Data Bridge
+<picture>
+  <source media="(prefers-color-scheme: dark)" srcset="apps/web/public/logo-white.png">
+  <img alt="Data Bridge" src="apps/web/public/logo-dark.png" width="400">
+</picture>
 
-### Turn any database into webhooks.
+### Keep any databases in sync — live, across engines.
 
-Connect a database, pick the table and columns visually, shape the payload, and
-stream changes to any HTTP endpoint — with durable, resumable, observable
-delivery. Works with **PostgreSQL · MySQL/MariaDB · SQLite · MongoDB · Redis**.
+Connect your databases, draw a **bridge** from a source to one or more
+destinations, and Data Bridge keeps them in sync: the moment a row changes in the
+source, it's written to every destination you linked. Any engine to any engine —
+**PostgreSQL · MySQL/MariaDB · SQLite · MongoDB · Redis** — plus HTTP endpoints
+when you need them.
 
-<sub>The database browser is the data source; hooks are the product.</sub>
+<sub>A bridge is just: a source → one or more destinations → kept in sync.</sub>
 
 </div>
 
@@ -16,37 +21,56 @@ delivery. Works with **PostgreSQL · MySQL/MariaDB · SQLite · MongoDB · Redis
 
 ## What it does
 
-A **hook** reads from a connected database and POSTs to an HTTP endpoint with a
-payload you design — no glue code, no cron scripts. How it fires depends on the
-trigger you choose:
+A **bridge** reads rows from a source database and writes each one to its
+**destinations**. A destination is either:
+
+- **another database** — the headline feature. Sync Postgres → MongoDB,
+  MySQL → SQLite, MongoDB → Redis… mix engines freely. One bridge can fan out to
+  **several databases at once**, and bridges can chain (DB&nbsp;A → DB&nbsp;B → DB&nbsp;C).
+- **an HTTP endpoint** — POST/PUT/PATCH each row to a URL with a payload you
+  design, for the times you're feeding a service instead of a database.
+
+What makes the database-to-database sync trustworthy:
+
+- **Any engine → any engine.** The same bridge moves a row between relational,
+  document, and key-value stores. Values are translated to fit the target.
+- **No duplicates, ever.** Writes are **idempotent upserts** keyed by the columns
+  you choose, so replays, retries, and redeliveries never double-write. Inserts,
+  updates, **and deletes** all propagate.
+- **Missing table? Auto-create it.** If the destination table/collection doesn't
+  exist, Data Bridge creates it from the source's shape (with cross-engine type
+  translation). Or **map and rename columns** yourself — "write this column into
+  that column over there."
+- **Live, polled, or one-shot** — you pick how it fires (see triggers below).
+
+### How a bridge fires
 
 - **Replay** — a one-shot job. Stream all (or selected) rows once, then finish.
-  Good for backfills and migrations.
-- **Watch** — poll a table on a cursor (an auto-increment id, an `updated_at`
-  column, or a primary-key diff) and deliver new rows as they show up. Works on
+  Perfect for the **initial backfill** or a migration.
+- **Watch** — poll the source on a cursor (an auto-increment id, an `updated_at`
+  column, or a primary-key diff) and sync new rows as they show up. Works on
   every engine.
-- **CDC** — true change-data-capture straight from the database's change log,
-  in real time. Postgres logical replication, MySQL binlog, MongoDB change
-  streams, Redis keyspace notifications. Inserts, updates, and deletes all come
-  through, each tagged with its operation.
+- **CDC** — true change-data-capture straight from the database's change log, in
+  **real time, no polling**. Postgres logical replication, MySQL binlog, MongoDB
+  change streams, Redis keyspace notifications. Inserts, updates, and deletes all
+  come through, each tagged with its operation.
 
-The rest is the same whichever trigger you pick:
+The rest is the same whichever destination and trigger you pick:
 
-- **Build it visually.** Browse a table, toggle the columns to send, and watch a
-  live JSON preview (schema + a real sample) of exactly what goes out.
-- **Shape the payload** with a safe token template — `{{column}}`, `{{$row}}`,
-  `{{$table}}`, `{{$op}}`, `{{$now}}`, `{{$index}}` — plus field selection,
-  renames, and a wrap key. No code execution.
-- **Deliver reliably.** Custom method/headers, an encrypted auth secret,
-  retries with backoff, rate limiting, optional batching, and an idempotency key
-  so a redelivery never double-writes downstream.
-- **Watch it happen.** A live delivery timeline colours every delivery
-  green (delivered) · red (failed) · amber (skipped) · slate (queued). Click any
-  cell for the full request body, response, status, timing, error, and
-  "Copy as cURL".
+- **Build it visually.** Browse the source table, toggle the columns to send,
+  pick destinations, and watch a live preview of exactly what will be written.
+- **Map or shape the data.** For a database target, map source → target columns
+  (rename, drop, pick keys). For an HTTP target, use a safe token template —
+  `{{column}}`, `{{$row}}`, `{{$table}}`, `{{$op}}`, `{{$now}}`, `{{$index}}`.
+  Structured substitution only — no string injection, no code execution.
+- **Sync reliably.** Retries with backoff, rate limiting, optional batching, and
+  exactly-once delivery so a change is applied once and only once downstream.
+- **Watch it happen.** A live timeline colours every delivery green (synced) ·
+  red (failed) · amber (skipped) · slate (queued). Click any cell for the exact
+  row written, the result, timing, and any error.
 - **Stay in control.** Runs survive restarts, resume where they stopped, and can
-  be cancelled. Skip queued rows by range or selection, or retry only the failed
-  ones in place — failed cells flip green.
+  be cancelled. Skip rows by range or selection, or retry only the failed ones in
+  place — failed cells flip green.
 
 ---
 
@@ -73,7 +97,7 @@ builds the workspace, runs the database migrations, then launches both the API
 and the web app.
 
 ```
-  data bridge · production
+  Data Bridge · ready
 
     Web  http://localhost:3002   ← open this
     API  http://localhost:4002/api
@@ -93,31 +117,31 @@ Working on the code? `pnpm dev` is the same thing in watch mode.
 > metadata (saved connections, hooks, runs, deliveries) through Prisma.
 > **Redis** backs the BullMQ queue that runs hooks durably. Connecting
 > databases, browsing data, and building/previewing hooks all work without
-> Redis — only *running* a hook needs it. Point `DATABASE_URL` / `REDIS_URL` at
+> Redis — only _running_ a hook needs it. Point `DATABASE_URL` / `REDIS_URL` at
 > your own instances if you'd rather not use the bundled containers.
 
 ---
 
-## The hook lifecycle
+## The bridge lifecycle
 
-1. **Connect** a database (credentials encrypted at rest) from the Data sources
-   workbench, or inline while building a hook.
-2. **Create a hook** — pick a table, choose the columns, design the payload, set
-   the destination, and pick a trigger (replay / watch / CDC). For CDC the
-   builder runs a readiness check and tells you exactly what (if anything) the
-   server still needs configured.
-3. **Run / listen** — a replay job streams rows with the timeline updating live;
-   a watch or CDC hook starts listening and delivers changes as they happen.
+1. **Connect** your databases (credentials encrypted at rest) from the Data
+   sources workbench, or inline while building a bridge.
+2. **Create a bridge** — pick the source table and columns, then choose where it
+   syncs: one or more **target databases** (map columns or let it auto-create the
+   table) and/or an **HTTP endpoint**. Pick a trigger (replay / watch / CDC). For
+   CDC the builder runs a readiness check and tells you exactly what (if anything)
+   the source still needs configured.
+3. **Run / listen** — a replay job streams rows once with the timeline updating
+   live; a watch or CDC bridge starts listening and syncs changes as they happen.
 4. **React** — skip rows you don't want, cancel, resume the remainder, or retry
-   the failures after fixing the endpoint. Edits to the hook apply on the next
-   run/resume.
+   the failures after fixing a destination. Edits apply on the next run/resume.
 
 ---
 
 ## Source data, when you need it
 
-Data Bridge ships a full database workbench (the "Data sources" surface) because
-hooks need somewhere to read from:
+Data Bridge ships a full database workbench (the "Data sources" surface) — handy
+for shaping a source and for inspecting what landed in a destination:
 
 - Browse any table — paginated, sortable, multi-condition filters, inline edit,
   insert/delete, CSV/JSON export.
@@ -126,8 +150,8 @@ hooks need somewhere to read from:
   (create/drop/truncate tables, create/drop databases).
 - Backup & restore — portable JSON for any engine, or `.sql` for relational ones.
 
-Every table view has a one-click "Create hook" that drops you into the builder
-pre-seeded with that table.
+Every table view has a one-click "Create bridge" that drops you into the builder
+pre-seeded with that table as the source.
 
 ---
 
@@ -141,32 +165,47 @@ data-bridge/
 │  └─ core/            @data-bridge/core — framework-agnostic domain (pure TS)
 │     ├─ adapters/       DatabaseAdapter interface + one file per engine
 │     │                  (raw drivers: pg, mysql2, better-sqlite3, mongodb, ioredis)
-│     └─ hooks/          payload transform engine + shared hook schemas (Zod)
+│     └─ hooks/          column mapping + cross-engine table translation,
+│                        payload transform, shared bridge schemas (Zod)
 ├─ apps/
 │  ├─ api/             @data-bridge/api — NestJS backend
-│  │  ├─ hooks/          hook store · run processor · CDC providers · HTTP delivery
+│  │  ├─ hooks/          bridge store · run processor · CDC providers ·
+│  │  │                  sink router → database sink + HTTP delivery
 │  │  ├─ connections/    Prisma-backed store · live adapter pool · controllers
 │  │  ├─ common/         crypto · Zod validation · exception filter
 │  │  └─ prisma/         metadata-store schema + migrations
 │  └─ web/             @data-bridge/web — Next.js 15 frontend (shadcn/ui, TanStack)
-└─ docker-compose.yml  Postgres (metadata) + Redis (hook queue)
+└─ docker-compose.yml  Postgres (metadata) + Redis (run queue)
 ```
 
+**One sink, two destination kinds.** Every trigger (replay, watch, CDC) funnels
+rows through a single sink router. It dispatches to the **database sink** (which
+maps columns, auto-creates the target if needed, and performs a native upsert or
+keyed delete on the target engine) or to **HTTP delivery** (template render +
+POST with retries). The runner, monitor, and exactly-once accounting don't care
+which — so a new destination is one module.
+
+**Exactly-once, cross-engine.** Database targets write with the engine's own
+atomic upsert — Postgres/SQLite `ON CONFLICT`, MySQL `ON DUPLICATE KEY`, Mongo
+`updateOne(upsert)` — keyed by the columns you chose. That makes every write
+idempotent: replays and at-least-once CDC redeliveries land a row once. Deletes
+route to a keyed delete on each target.
+
 **Durable runs.** A replay run is one BullMQ job (`jobId = runId`). It streams
-the source a page at a time, delivers sequentially (natural backpressure), and
-checkpoints progress — so a crash auto-resumes from where it left off, and
-re-delivery is idempotent via a `(runId, sequence)` guard.
+the source a page at a time (keyset pagination for millions of rows), syncs
+sequentially (natural backpressure), and checkpoints progress — so a crash
+auto-resumes from where it left off.
 
 **CDC behind one interface.** Each engine captures changes its own way, but they
 all implement the same small `CdcProvider` contract (readiness, provision,
 stream, cursor). The service around them handles the run lifecycle and the
-shared dedupe → render → deliver → record → checkpoint pipeline, so adding a
-new engine's CDC is a single file.
+shared dedupe → map → write → record → checkpoint pipeline, so adding a new
+engine's CDC is a single file.
 
-**Two data layers, two right tools.** The databases you connect *to* have
+**Two data layers, two right tools.** The databases you connect _to_ have
 unknown, runtime-discovered schemas, so the adapters use raw drivers with fully
 parameterized queries (an ORM can't introspect arbitrary schemas). Data Bridge's
-*own* store has a fixed schema we control, so it uses Prisma with migrations.
+_own_ store has a fixed schema we control, so it uses Prisma with migrations.
 
 > Adding an engine = implement `DatabaseAdapter` and register it. The connection
 > form, schema browser, and feature gating all derive from that one registration.
@@ -178,33 +217,33 @@ parameterized queries (an ORM can't introspect arbitrary schemas). Data Bridge's
 Env files are created automatically on first run from the committed
 `*.env.example` files. The essentials:
 
-| Variable                      | Where | Purpose                                     |
-| ----------------------------- | ----- | ------------------------------------------- |
-| `PORT`                        | api   | API port (default `4002`)                   |
-| `WEB_PORT`                    | web   | Web port (default `3002`)                   |
-| `NEXT_PUBLIC_API_URL`         | web   | Base URL of the API                         |
-| `DATABASE_URL`                | api   | Postgres datasource for the metadata store  |
-| `REDIS_URL`                   | api   | Redis backing the hook-run queue            |
-| `DATABRIDGE_MASTER_KEY`       | api   | base64 32-byte key for secret encryption    |
-| `DATABRIDGE_HOOK_CONCURRENCY` | api   | How many hook runs may execute in parallel  |
-| `WEB_ORIGIN`                  | api   | CORS origin (defaults to any in dev)        |
+| Variable                      | Where | Purpose                                      |
+| ----------------------------- | ----- | -------------------------------------------- |
+| `PORT`                        | api   | API port (default `4002`)                    |
+| `WEB_PORT`                    | web   | Web port (default `3002`)                    |
+| `NEXT_PUBLIC_API_URL`         | web   | Base URL of the API                          |
+| `DATABASE_URL`                | api   | Postgres datasource for the metadata store   |
+| `REDIS_URL`                   | api   | Redis backing the bridge-run queue           |
+| `DATABRIDGE_MASTER_KEY`       | api   | base64 32-byte key for secret encryption     |
+| `DATABRIDGE_HOOK_CONCURRENCY` | api   | How many bridge runs may execute in parallel |
+| `WEB_ORIGIN`                  | api   | CORS origin (defaults to any in dev)         |
 
 If `DATABRIDGE_MASTER_KEY` is unset, a random key is generated under
 `apps/api/.data-bridge/` on first run — set it explicitly in production.
 
 ## CDC prerequisites
 
-Watch hooks work anywhere. CDC needs the source database configured for change
-capture; the builder's readiness panel checks all of this for you and spells out
-what's missing.
+Replay and watch bridges work anywhere. CDC needs the **source** database
+configured for change capture; the builder's readiness panel checks all of this
+for you and spells out what's missing.
 
-| Engine     | Mechanism               | What it needs                                                        |
-| ---------- | ----------------------- | -------------------------------------------------------------------- |
-| PostgreSQL | logical replication     | `wal_level=logical`, a role with REPLICATION (slot/publication auto-made) |
-| MySQL      | binary log              | `log_bin=ON`, `binlog_format=ROW`, `binlog_row_image=FULL`, REPLICATION grants |
-| MongoDB    | change streams          | a replica set (a single-node one is fine for dev)                    |
-| Redis      | keyspace notifications  | `notify-keyspace-events` (Data Bridge enables it when it can)        |
-| SQLite     | —                       | not supported; use a watch hook instead                              |
+| Engine     | Mechanism              | What it needs                                                                                               |
+| ---------- | ---------------------- | ----------------------------------------------------------------------------------------------------------- |
+| PostgreSQL | logical replication    | `wal_level=logical`, a role with REPLICATION (slot/publication auto-made)                                   |
+| MySQL      | binary log             | `log_bin=ON`, `binlog_format=ROW`, `binlog_row_image=FULL`, REPLICATION grants                              |
+| MongoDB    | change streams         | a replica set (a single-node one is fine for dev); pre-images auto-enabled so deletes propagate by your key |
+| Redis      | keyspace notifications | `notify-keyspace-events` (Data Bridge enables it when it can)                                               |
+| SQLite     | —                      | not supported; use a watch hook instead                                                                     |
 
 > Redis CDC is real-time only and non-durable — events that happen while Data
 > Bridge is offline can't be recovered, so prefer a watch hook there if you need
@@ -212,16 +251,16 @@ what's missing.
 
 ## Scripts
 
-| Command                                       | Description                                   |
-| --------------------------------------------- | --------------------------------------------- |
-| `pnpm install`                                | Install all workspaces                        |
-| `pnpm start`                                  | Initialize + run everything (production)      |
-| `pnpm dev`                                    | Same, with watch-mode for development         |
-| `pnpm dev:api` / `pnpm dev:web`               | Run one side only                             |
-| `pnpm build`                                  | Production build: core → api → web            |
-| `pnpm db:studio`                              | Open Prisma Studio on the metadata store      |
-| `pnpm typecheck` · `test` · `lint` · `format` | Quality across all workspaces                 |
-| `pnpm clean` / `clean:all`                    | Remove build artifacts (and node_modules)     |
+| Command                                       | Description                               |
+| --------------------------------------------- | ----------------------------------------- |
+| `pnpm install`                                | Install all workspaces                    |
+| `pnpm start`                                  | Initialize + run everything (production)  |
+| `pnpm dev`                                    | Same, with watch-mode for development     |
+| `pnpm dev:api` / `pnpm dev:web`               | Run one side only                         |
+| `pnpm build`                                  | Production build: core → api → web        |
+| `pnpm db:studio`                              | Open Prisma Studio on the metadata store  |
+| `pnpm typecheck` · `test` · `lint` · `format` | Quality across all workspaces             |
+| `pnpm clean` / `clean:all`                    | Remove build artifacts (and node_modules) |
 
 ## Tech stack
 
@@ -237,7 +276,8 @@ React Flow · Zod · Vitest.
 - Hook payloads are built by structured token substitution — no string injection,
   no code execution.
 - Data Bridge runs locally with no auth layer. Add authentication, and restrict
-  hook destination URLs, before exposing it to an untrusted network.
+  which destinations (database connections / endpoint URLs) a bridge may write
+  to, before exposing it to an untrusted network.
 
 ## License
 

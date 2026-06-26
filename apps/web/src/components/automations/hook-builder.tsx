@@ -3,16 +3,19 @@
 import { useEffect, useMemo, useRef, useState } from 'react';
 import {
   Check,
+  Database,
   Loader2,
   Pencil,
   Plus,
   Radio,
   RefreshCw,
+  Trash2,
   Webhook,
   X,
 } from 'lucide-react';
 import { toast } from 'sonner';
 import {
+  mapRow,
   renderRow,
   type FilterSpec,
   type HookInputDTO,
@@ -61,6 +64,33 @@ interface Destination {
   authHeaderValue: string;
   headers: { key: string; value: string }[];
   idempotency: boolean;
+}
+
+/** a single database a bridge writes into (UI shape) */
+interface DbTarget {
+  connectionId: string;
+  database: string;
+  schema: string;
+  table: string;
+  writeMode: 'upsert' | 'insert';
+  /** target column names that uniquely identify a row (for upsert) */
+  keyColumns: string[];
+  createMissingTable: boolean;
+  /** optional source column → target column renames (default identity) */
+  renames: Record<string, string>;
+}
+
+function blankDbTarget(): DbTarget {
+  return {
+    connectionId: '',
+    database: '',
+    schema: '',
+    table: '',
+    writeMode: 'upsert',
+    keyColumns: [],
+    createMissingTable: true,
+    renames: {},
+  };
 }
 
 interface Delivery {
@@ -148,7 +178,9 @@ export function HookBuilder() {
 
   // ----- payload / destination / delivery -----
   const [wrapKey, setWrapKey] = useState('');
+  const [destKind, setDestKind] = useState<'http' | 'database'>('http');
   const [dest, setDest] = useState<Destination>(blankDestination);
+  const [dbTargets, setDbTargets] = useState<DbTarget[]>([blankDbTarget()]);
   const [delivery, setDelivery] = useState<Delivery>(blankDelivery);
 
   const { data: connections } = useConnections();
@@ -201,7 +233,7 @@ export function HookBuilder() {
       setDatabase(hookEditor.seed.database ?? '');
       setSchema(hookEditor.seed.schema ?? '');
       setTable(hookEditor.seed.table);
-      setName(`${hookEditor.seed.table} → webhook`);
+      setName(`${hookEditor.seed.table} → bridge`);
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [hookEditor.open, editing, hookEditor.seed]);
@@ -247,7 +279,9 @@ export function HookBuilder() {
     setCdcOps(new Set(['insert', 'update', 'delete']));
     setReadiness(null);
     setWrapKey('');
+    setDestKind('http');
     setDest(blankDestination());
+    setDbTargets([blankDbTarget()]);
     setDelivery(blankDelivery());
   }
 
@@ -288,24 +322,44 @@ export function HookBuilder() {
       setBuilderKind('job');
       setTriggerKind('replay');
     }
-    setDest({
-      url: h.destination.url,
-      method: h.destination.method,
-      authType: h.destination.auth.type,
-      authToken:
-        h.destination.auth.type === 'bearer' ? h.destination.auth.token : '',
-      authHeaderName:
-        h.destination.auth.type === 'header' ? h.destination.auth.name : '',
-      authHeaderValue:
-        h.destination.auth.type === 'header' ? h.destination.auth.value : '',
-      headers: Object.entries(h.destination.headers ?? {}).map(
-        ([key, value]) => ({
-          key,
-          value,
-        }),
-      ),
-      idempotency: h.destination.idempotency,
-    });
+    if (h.destination.kind === 'database') {
+      setDestKind('database');
+      setDbTargets(
+        h.destination.targets.map((t) => ({
+          connectionId: t.connectionId,
+          database: t.database ?? '',
+          schema: t.schema ?? '',
+          table: t.table,
+          writeMode: t.writeMode,
+          keyColumns: t.keyColumns,
+          createMissingTable: t.createMissingTable,
+          renames: Object.fromEntries(
+            t.mapping
+              .filter((m) => m.source !== m.target)
+              .map((m) => [m.source, m.target]),
+          ),
+        })),
+      );
+      setDest(blankDestination());
+    } else {
+      setDestKind('http');
+      setDbTargets([blankDbTarget()]);
+      setDest({
+        url: h.destination.url,
+        method: h.destination.method,
+        authType: h.destination.auth.type,
+        authToken:
+          h.destination.auth.type === 'bearer' ? h.destination.auth.token : '',
+        authHeaderName:
+          h.destination.auth.type === 'header' ? h.destination.auth.name : '',
+        authHeaderValue:
+          h.destination.auth.type === 'header' ? h.destination.auth.value : '',
+        headers: Object.entries(h.destination.headers ?? {}).map(
+          ([key, value]) => ({ key, value }),
+        ),
+        idempotency: h.destination.idempotency,
+      });
+    }
     setDelivery({
       batchSize: h.delivery.batchSize,
       maxAttempts: h.delivery.maxAttempts,
@@ -337,15 +391,23 @@ export function HookBuilder() {
     let body: unknown = null;
     let error: string | null = null;
     try {
-      body = renderRow(
-        sampleRow,
-        {
-          template: '{{$row}}',
-          fields: includedList,
-          wrapKey: wrapKey || undefined,
-        },
-        { table: table || '(table)', now: new Date().toISOString(), index: 0 },
-      ).body;
+      if (destKind === 'database') {
+        const renames = dbTargets[0]?.renames ?? {};
+        body = mapRow(
+          sampleRow,
+          includedList.map((s) => ({ source: s, target: renames[s]?.trim() || s })),
+        );
+      } else {
+        body = renderRow(
+          sampleRow,
+          {
+            template: '{{$row}}',
+            fields: includedList,
+            wrapKey: wrapKey || undefined,
+          },
+          { table: table || '(table)', now: new Date().toISOString(), index: 0 },
+        ).body;
+      }
     } catch (err) {
       error = err instanceof Error ? err.message : String(err);
     }
@@ -354,7 +416,7 @@ export function HookBuilder() {
       body,
       error,
     };
-  }, [sampleRow, includedList, wrapKey, table]);
+  }, [sampleRow, includedList, wrapKey, table, destKind, dbTargets]);
 
   /* ----- selection helpers ----- */
 
@@ -398,10 +460,20 @@ export function HookBuilder() {
     mode === 'selected' ? selectedKeys.size : (browse?.total ?? null);
   const watchNeedsColumn =
     triggerKind === 'watch' && watchStrategy !== 'snapshot' && !watchColumn;
+  const destReady =
+    destKind === 'http'
+      ? dest.url.trim().length > 0
+      : dbTargets.length > 0 &&
+        dbTargets.every(
+          (t) =>
+            !!t.connectionId &&
+            t.table.trim().length > 0 &&
+            (t.writeMode === 'insert' || t.keyColumns.length > 0),
+        );
   const canSave =
     !!connectionId &&
     !!table &&
-    dest.url.trim().length > 0 &&
+    destReady &&
     includedList.length > 0 &&
     !(mode === 'selected' && (!singlePk || selectedKeys.size === 0)) &&
     !watchNeedsColumn;
@@ -419,7 +491,10 @@ export function HookBuilder() {
       ? [{ column: singlePk, direction: 'asc' }]
       : undefined;
 
-    const auth: HookInputDTO['destination']['auth'] =
+    const auth: Extract<
+      HookInputDTO['destination'],
+      { kind: 'http' }
+    >['auth'] =
       dest.authType === 'bearer'
         ? { type: 'bearer', token: dest.authToken }
         : dest.authType === 'header'
@@ -435,8 +510,39 @@ export function HookBuilder() {
 
     const allIncluded = includedList.length === columns.length;
 
+    const destination: HookInputDTO['destination'] =
+      destKind === 'database'
+        ? {
+            kind: 'database',
+            targets: dbTargets.map((t) => ({
+              connectionId: t.connectionId,
+              database: t.database || undefined,
+              schema: t.schema || undefined,
+              table: t.table.trim(),
+              writeMode: t.writeMode,
+              keyColumns: t.keyColumns,
+              // always send the full projection so the included-column choice is
+              // honored; renames apply where the target name differs
+              mapping: includedList.map((s) => ({
+                source: s,
+                target: (t.renames[s]?.trim() || s),
+              })),
+              createMissingTable: t.createMissingTable,
+            })),
+          }
+        : {
+            kind: 'http',
+            url: dest.url.trim(),
+            method: dest.method,
+            headers: headerEntries.length
+              ? Object.fromEntries(headerEntries)
+              : undefined,
+            auth,
+            idempotency: dest.idempotency,
+          };
+
     return {
-      name: name.trim() || `${table} → webhook`,
+      name: name.trim() || `${table} → bridge`,
       source: {
         kind: 'table',
         connectionId,
@@ -446,15 +552,7 @@ export function HookBuilder() {
         filters: filters.length ? filters : undefined,
         sort,
       },
-      destination: {
-        url: dest.url.trim(),
-        method: dest.method,
-        headers: headerEntries.length
-          ? Object.fromEntries(headerEntries)
-          : undefined,
-        auth,
-        idempotency: dest.idempotency,
-      },
+      destination,
       transform: {
         template: '{{$row}}',
         fields: allIncluded ? undefined : includedList,
@@ -1176,6 +1274,57 @@ export function HookBuilder() {
               {/* destination */}
               <section className="space-y-2">
                 <h3 className="text-sm font-semibold">Destination</h3>
+                <div className="flex overflow-hidden rounded-md border text-xs">
+                  {(
+                    [
+                      ['http', 'HTTP endpoint'],
+                      ['database', 'Database'],
+                    ] as const
+                  ).map(([k, label]) => (
+                    <button
+                      key={k}
+                      onClick={() => {
+                        setDestKind(k);
+                        // seed the first target's key with the source PK so an
+                        // upsert works out of the box
+                        if (k === 'database' && singlePk) {
+                          setDbTargets((prev) =>
+                            prev.map((t, i) =>
+                              i === 0 && t.keyColumns.length === 0
+                                ? { ...t, keyColumns: [singlePk] }
+                                : t,
+                            ),
+                          );
+                        }
+                      }}
+                      className={cn(
+                        'flex flex-1 items-center justify-center gap-1.5 px-2.5 py-1.5 transition-colors',
+                        destKind === k
+                          ? 'bg-accent font-medium'
+                          : 'text-muted-foreground hover:bg-accent/50',
+                      )}
+                    >
+                      {k === 'http' ? (
+                        <Webhook className="h-3.5 w-3.5" />
+                      ) : (
+                        <Database className="h-3.5 w-3.5" />
+                      )}
+                      {label}
+                    </button>
+                  ))}
+                </div>
+
+                {destKind === 'database' && (
+                  <DbTargetsEditor
+                    targets={dbTargets}
+                    setTargets={setDbTargets}
+                    sourceColumns={includedList}
+                    sourcePk={singlePk}
+                  />
+                )}
+
+                {destKind === 'http' && (
+                <>
                 <div className="grid grid-cols-[90px_1fr] gap-2">
                   <Select
                     value={dest.method}
@@ -1330,6 +1479,8 @@ export function HookBuilder() {
                     }
                   />
                 </label>
+                </>
+                )}
               </section>
 
               {/* delivery */}
@@ -1428,6 +1579,273 @@ function NumField({
         value={value}
         onChange={(e) => onChange(Number(e.target.value))}
       />
+    </div>
+  );
+}
+
+/* -------------------------------------------------------------------------- */
+/* database destination editor                                                */
+/* -------------------------------------------------------------------------- */
+
+function DbTargetsEditor({
+  targets,
+  setTargets,
+  sourceColumns,
+  sourcePk,
+}: {
+  targets: DbTarget[];
+  setTargets: React.Dispatch<React.SetStateAction<DbTarget[]>>;
+  sourceColumns: string[];
+  sourcePk: string | null;
+}) {
+  const patch = (i: number, p: Partial<DbTarget>) =>
+    setTargets((prev) => prev.map((t, j) => (j === i ? { ...t, ...p } : t)));
+  const add = () =>
+    setTargets((prev) => [
+      ...prev,
+      { ...blankDbTarget(), keyColumns: sourcePk ? [sourcePk] : [] },
+    ]);
+  const remove = (i: number) =>
+    setTargets((prev) => prev.filter((_, j) => j !== i));
+
+  return (
+    <div className="space-y-2">
+      <p className="text-muted-foreground text-[11px]">
+        Write each row into one or more databases. <strong>Upsert</strong> keeps
+        targets in sync with no duplicates, even on replays. Cross-engine is
+        supported (e.g. Postgres → MySQL or MongoDB).
+      </p>
+      {targets.map((t, i) => (
+        <DbTargetCard
+          key={i}
+          target={t}
+          sourceColumns={sourceColumns}
+          onChange={(p) => patch(i, p)}
+          onRemove={targets.length > 1 ? () => remove(i) : undefined}
+        />
+      ))}
+      <Button variant="outline" size="sm" className="h-7" onClick={add}>
+        <Plus className="mr-1 h-3.5 w-3.5" /> Add target database
+      </Button>
+    </div>
+  );
+}
+
+function DbTargetCard({
+  target,
+  sourceColumns,
+  onChange,
+  onRemove,
+}: {
+  target: DbTarget;
+  sourceColumns: string[];
+  onChange: (patch: Partial<DbTarget>) => void;
+  onRemove?: () => void;
+}) {
+  const { data: connections } = useConnections();
+  const { data: databases } = useDatabases(target.connectionId || null);
+  const { data: schemaData } = useSchema(
+    target.connectionId || null,
+    target.database || undefined,
+  );
+  const [showMap, setShowMap] = useState(false);
+  const tables = useMemo<TableSchema[]>(
+    () => schemaData?.namespaces.flatMap((ns) => ns.tables) ?? [],
+    [schemaData],
+  );
+  const conn = connections?.find((c) => c.id === target.connectionId);
+  // target column names the row will be written under (after renames)
+  const targetNames = sourceColumns.map(
+    (s) => target.renames[s]?.trim() || s,
+  );
+
+  const toggleKey = (name: string) =>
+    onChange({
+      keyColumns: target.keyColumns.includes(name)
+        ? target.keyColumns.filter((k) => k !== name)
+        : [...target.keyColumns, name],
+    });
+
+  return (
+    <div className="space-y-2 rounded-md border p-2.5">
+      <div className="flex items-center gap-2">
+        <Select
+          value={target.connectionId}
+          onValueChange={(v) =>
+            onChange({ connectionId: v, database: '', schema: '', table: '' })
+          }
+        >
+          <SelectTrigger className="h-8 flex-1">
+            <SelectValue placeholder="Target connection" />
+          </SelectTrigger>
+          <SelectContent>
+            {(connections?.length ?? 0) === 0 && (
+              <div className="text-muted-foreground px-2 py-1.5 text-xs">
+                No connections yet
+              </div>
+            )}
+            {connections?.map((c) => (
+              <SelectItem key={c.id} value={c.id}>
+                {c.name}
+                <span className="text-muted-foreground ml-1.5 text-[10px] uppercase">
+                  {c.engine}
+                </span>
+              </SelectItem>
+            ))}
+          </SelectContent>
+        </Select>
+        {onRemove && (
+          <Button
+            variant="ghost"
+            size="icon"
+            className="h-8 w-8 shrink-0"
+            onClick={onRemove}
+            title="Remove this target"
+          >
+            <Trash2 className="h-4 w-4" />
+          </Button>
+        )}
+      </div>
+
+      <div className="grid grid-cols-2 gap-2">
+        {(databases?.length ?? 0) > 0 && (
+          <Select
+            value={target.database || '__default'}
+            onValueChange={(v) =>
+              onChange({ database: v === '__default' ? '' : v, table: '' })
+            }
+          >
+            <SelectTrigger className="h-8">
+              <SelectValue />
+            </SelectTrigger>
+            <SelectContent>
+              <SelectItem value="__default">(default db)</SelectItem>
+              {databases?.map((d) => (
+                <SelectItem key={d} value={d}>
+                  {d}
+                </SelectItem>
+              ))}
+            </SelectContent>
+          </Select>
+        )}
+        {conn?.engine === 'postgres' && (
+          <Input
+            className="h-8"
+            placeholder="schema (e.g. public)"
+            value={target.schema}
+            onChange={(e) => onChange({ schema: e.target.value })}
+          />
+        )}
+      </div>
+
+      <div className="grid gap-1.5">
+        <Label className="text-xs">Target table / collection</Label>
+        <Input
+          className="h-8"
+          list={`tables-${target.connectionId}`}
+          placeholder="existing or new table name"
+          value={target.table}
+          onChange={(e) => onChange({ table: e.target.value })}
+        />
+        <datalist id={`tables-${target.connectionId}`}>
+          {tables.map((t) => (
+            <option key={`${t.schema ?? ''}.${t.name}`} value={t.name} />
+          ))}
+        </datalist>
+      </div>
+
+      <div className="grid grid-cols-2 gap-2">
+        <div className="grid gap-1.5">
+          <Label className="text-xs">Write mode</Label>
+          <Select
+            value={target.writeMode}
+            onValueChange={(v) =>
+              onChange({ writeMode: v as DbTarget['writeMode'] })
+            }
+          >
+            <SelectTrigger className="h-8">
+              <SelectValue />
+            </SelectTrigger>
+            <SelectContent>
+              <SelectItem value="upsert">Upsert (no duplicates)</SelectItem>
+              <SelectItem value="insert">Insert (append)</SelectItem>
+            </SelectContent>
+          </Select>
+        </div>
+        <label className="flex items-end justify-between gap-2 pb-1">
+          <span className="text-xs">Create table if missing</span>
+          <Switch
+            checked={target.createMissingTable}
+            onCheckedChange={(v) => onChange({ createMissingTable: v })}
+          />
+        </label>
+      </div>
+
+      {target.writeMode === 'upsert' && (
+        <div className="grid gap-1.5">
+          <Label className="text-xs">
+            Key columns{' '}
+            <span className="text-muted-foreground">
+              (match rows on — required for upsert)
+            </span>
+          </Label>
+          <div className="flex flex-wrap gap-1.5">
+            {targetNames.length === 0 && (
+              <span className="text-muted-foreground text-[11px]">
+                Select source columns first.
+              </span>
+            )}
+            {targetNames.map((name) => {
+              const on = target.keyColumns.includes(name);
+              return (
+                <button
+                  key={name}
+                  onClick={() => toggleKey(name)}
+                  className={cn(
+                    'rounded border px-1.5 py-0.5 text-[11px] transition-colors',
+                    on
+                      ? 'bg-primary text-primary-foreground border-primary'
+                      : 'hover:bg-accent',
+                  )}
+                >
+                  {name}
+                </button>
+              );
+            })}
+          </div>
+        </div>
+      )}
+
+      <button
+        onClick={() => setShowMap((s) => !s)}
+        className="text-muted-foreground hover:text-foreground text-[11px] underline"
+      >
+        {showMap ? 'Hide column mapping' : 'Map / rename columns'}
+      </button>
+      {showMap && (
+        <div className="grid gap-1 rounded-md border p-2">
+          <div className="text-muted-foreground grid grid-cols-2 gap-2 text-[10px] uppercase">
+            <span>Source column</span>
+            <span>Target column</span>
+          </div>
+          {sourceColumns.map((s) => (
+            <div key={s} className="grid grid-cols-2 items-center gap-2">
+              <span className="truncate font-mono text-[11px]">{s}</span>
+              <Input
+                className="h-7 text-xs"
+                value={target.renames[s] ?? ''}
+                placeholder={s}
+                onChange={(e) => {
+                  const renames = { ...target.renames };
+                  if (e.target.value.trim()) renames[s] = e.target.value;
+                  else delete renames[s];
+                  onChange({ renames });
+                }}
+              />
+            </div>
+          ))}
+        </div>
+      )}
     </div>
   );
 }

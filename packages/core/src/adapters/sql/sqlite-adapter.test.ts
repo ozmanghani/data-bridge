@@ -113,4 +113,34 @@ describe('SqliteAdapter', () => {
     });
     expect(result.rows).toHaveLength(2);
   });
+
+  it('upserts idempotently keyed by a unique column (bridge sink)', async () => {
+    // first upsert inserts a new row
+    await adapter.upsertRow({
+      table: 'users',
+      values: { id: 10, name: 'Grace', email: 'grace@x.com' },
+      keyColumns: ['id'],
+    });
+    let res = await adapter.browse({ table: 'users', limit: 50, offset: 0 });
+    expect(res.total).toBe(3);
+
+    // re-running the SAME upsert must NOT create a duplicate (exactly-once)
+    await adapter.upsertRow({
+      table: 'users',
+      values: { id: 10, name: 'Grace', email: 'grace@x.com' },
+      keyColumns: ['id'],
+    });
+    res = await adapter.browse({ table: 'users', limit: 50, offset: 0 });
+    expect(res.total).toBe(3);
+
+    // an upsert with the same key but changed values updates in place
+    await adapter.upsertRow({
+      table: 'users',
+      values: { id: 10, name: 'Grace Hopper', email: 'grace@x.com' },
+      keyColumns: ['id'],
+    });
+    res = await adapter.browse({ table: 'users', limit: 50, offset: 0 });
+    expect(res.total).toBe(3);
+    expect(res.rows.find((r) => r.id === 10)?.name).toBe('Grace Hopper');
+  });
 });

@@ -2,7 +2,7 @@
   "name": "@data-bridge/api",
   "version": "0.1.0",
   "private": true,
-  "description": "Data Bridge backend — NestJS API serving the database studio.",
+  "description": "Data Bridge backend — NestJS API that runs cross-engine database-to-database sync bridges (replay, polling, and CDC).",
   "scripts": {
     "build": "prisma generate && nest build",
     "dev": "prisma generate && prisma migrate deploy && nest start --watch",

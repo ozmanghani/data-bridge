@@ -18,8 +18,6 @@ import { Processor, WorkerHost } from '@nestjs/bullmq';
 import { Logger } from '@nestjs/common';
 import {
   BadRequestError,
-  renderBatch,
-  renderRow,
   type BrowseParams,
   type SortSpec,
 } from '@data-bridge/core';
@@ -27,7 +25,7 @@ import type { Job } from 'bullmq';
 import { AdapterPoolService } from '../connections/adapter-pool.service';
 import { runtimeConfig } from '../common/runtime-config';
 import { sleep } from './delivery.service';
-import { DeliveryService } from './delivery.service';
+import { HookSinkService } from './hook-sink.service';
 import { HookRunService } from './hook-run.service';
 import { HookStoreService } from './hook-store.service';
 import { RunRegistryService } from './run-registry.service';
@@ -46,7 +44,7 @@ export class HookRunProcessor extends WorkerHost {
     private readonly runs: HookRunService,
     private readonly store: HookStoreService,
     private readonly pool: AdapterPoolService,
-    private readonly delivery: DeliveryService,
+    private readonly sink: HookSinkService,
     private readonly registry: RunRegistryService,
   ) {
     super();
@@ -169,15 +167,10 @@ export class HookRunProcessor extends WorkerHost {
     if (done.has(sequence)) return false; // already delivered on an earlier attempt
 
     const now = new Date().toISOString();
-    const { body } =
-      rows.length === 1
-        ? renderRow(rows[0]!, hook.transform, { table, now, index: startIndex })
-        : renderBatch(rows, hook.transform, startIndex, { table, now });
-
-    const outcome = await this.delivery.send(
-      body,
-      hook.destination,
-      hook.delivery,
+    const { outcome } = await this.sink.deliver(
+      hook,
+      rows,
+      { table, now, startIndex },
       signal,
       `${runId}:${sequence}`,
     );

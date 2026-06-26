@@ -2,6 +2,8 @@ import { BullModule } from '@nestjs/bullmq';
 import { Module } from '@nestjs/common';
 import { ConnectionsModule } from '../connections/connections.module';
 import { DeliveryService } from './delivery.service';
+import { DatabaseSinkService } from './database-sink.service';
+import { HookSinkService } from './hook-sink.service';
 import { HookRunProcessor } from './hook-run.processor';
 import { HookRunService } from './hook-run.service';
 import { HookCdcService } from './hook-cdc.service';
@@ -31,6 +33,8 @@ import { SqliteCdcProvider } from './cdc/providers/sqlite-cdc.provider';
     HookWatchService,
     HookCdcService,
     DeliveryService,
+    DatabaseSinkService,
+    HookSinkService,
     RunRegistryService,
     HookRunProcessor,
     HookWatchProcessor,

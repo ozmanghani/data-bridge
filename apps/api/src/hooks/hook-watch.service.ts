@@ -19,7 +19,6 @@ import {
   NotFoundError,
   advanceCursor,
   emptyCursor,
-  renderRow,
   rowKey,
   watchQuery,
   watchStrategySchema,
@@ -29,7 +28,8 @@ import {
 import { Queue } from 'bullmq';
 import { AdapterPoolService } from '../connections/adapter-pool.service';
 import { PrismaService } from '../common/prisma.service';
-import { DeliveryService, sleep } from './delivery.service';
+import { sleep } from './delivery.service';
+import { HookSinkService } from './hook-sink.service';
 import { HookRunService } from './hook-run.service';
 import { HookStoreService } from './hook-store.service';
 import type { ResolvedHook } from './hooks.types';
@@ -53,7 +53,7 @@ export class HookWatchService implements OnModuleInit {
     private readonly prisma: PrismaService,
     private readonly store: HookStoreService,
     private readonly pool: AdapterPoolService,
-    private readonly delivery: DeliveryService,
+    private readonly sink: HookSinkService,
     private readonly runs: HookRunService,
     @InjectQueue(HOOK_WATCH_QUEUE) private readonly queue: Queue<HookWatchJob>,
   ) {}
@@ -186,16 +186,14 @@ export class HookWatchService implements OnModuleInit {
     let seq = run.cursorOffset;
     for (const row of newRows) {
       const now = new Date().toISOString();
-      const { body } = renderRow(row, hook.transform, {
-        table: src.table,
-        now,
-        index: seq,
-      });
-      const idem = hook.destination.idempotency ? `${run.id}:${seq}` : undefined;
-      const outcome = await this.delivery.send(
-        body,
-        hook.destination,
-        hook.delivery,
+      const idem =
+        hook.destination.kind === 'http' && hook.destination.idempotency
+          ? `${run.id}:${seq}`
+          : undefined;
+      const { outcome } = await this.sink.deliver(
+        hook,
+        [row],
+        { table: src.table, now, startIndex: seq },
         signal,
         idem,
       );

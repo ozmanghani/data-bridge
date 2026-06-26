@@ -12,6 +12,7 @@ import {
   useStartWatch,
   useStopWatch,
 } from '@/lib/queries';
+import { destinationLabel, type EndpointInfo } from '@data-bridge/core';
 import { useStudio } from '@/lib/store';
 import { cn } from '@/lib/utils';
 import { useConfirm } from '@/components/confirm';
@@ -29,13 +30,15 @@ export function AutomationsView() {
     return <WorkspaceMap />;
   }
 
-  const destHostname = (() => {
-    try {
-      return new URL(hook.destination.url).hostname;
-    } catch {
-      return hook.destination.url;
-    }
-  })();
+  const dest = hook.destination;
+  const endpoint =
+    dest.kind === 'http'
+      ? { kind: 'http' as const, url: dest.url, method: dest.method }
+      : {
+          kind: 'database' as const,
+          url: destinationLabel(dest),
+          method: 'WRITE',
+        };
 
   return (
     <HookPanel
@@ -45,8 +48,8 @@ export function AutomationsView() {
       sourceLabel={
         hook.source.kind === 'table' ? hook.source.table : 'custom query'
       }
-      destLabel={`${hook.destination.method} ${destHostname}`}
-      endpoint={{ url: hook.destination.url, method: hook.destination.method }}
+      destLabel={destinationLabel(dest)}
+      endpoint={endpoint}
       isWatch={hook.trigger.kind !== 'replay'}
       onDeleted={() => selectHook(null)}
     />
@@ -66,7 +69,7 @@ function HookPanel({
   hookName: string;
   sourceLabel: string;
   destLabel: string;
-  endpoint: { url: string; method: string };
+  endpoint: EndpointInfo;
   isWatch: boolean;
   onDeleted: () => void;
 }) {
